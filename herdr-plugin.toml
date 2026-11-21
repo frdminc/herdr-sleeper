@@ -2,7 +2,7 @@ id = "djbclark.herdr-sleeper"
 name = "Herdr Sleeper"
 version = "0.1.1"
 min_herdr_version = "0.9.1"
-description = "Sleep idle resumable agents after a configurable window (fail-closed); wake on focus, Enter, or command."
+description = "Sleep idle resumable agents after a configurable window (fail-closed); wake by answering y at the pane prompt, by command, or from the sidebar (on focus only if opted in)."
 platforms = ["macos", "linux"]
 
 # Ensure the idle watcher (no-op if one is already running this code).
@@ -39,6 +39,12 @@ title = "Show the sleeper event log"
 contexts = []
 command = ["./herdr-sleeper", "log"]
 
+[[actions]]
+id = "version"
+title = "Show the plugin version and watcher status"
+contexts = []
+command = ["./herdr-sleeper", "version"]
+
 # Fallback: if the server started before this plugin was enabled, `startup` never ran for it.
 # Same idempotent guard as the startup hook.
 [[actions]]
@@ -47,7 +53,8 @@ title = "Ensure the idle watcher is running"
 contexts = []
 command = ["./herdr-sleeper", "startup"]
 
-# Wake sleeping agents attached to panes that get focused.
+# Wake sleeping agents attached to panes that get focused. A no-op unless `wake_on_focus = true`
+# (or HERDR_SLEEPER_WAKE_ON_FOCUS=1) is set: a focus cannot tell a click from a workspace switch or a restore.
 [[events]]
 on = "pane.focused"
 command = ["./herdr-sleeper", "on-focus"]
