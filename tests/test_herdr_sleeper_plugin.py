@@ -353,7 +353,7 @@ CLAUDE_SCREEN = """
 def test_composer_state_fails_closed() -> None:
     cs = sleeper.composer_state
     assert cs(CLAUDE_SCREEN.format(composer=""))[0] == "empty"
-    assert cs(CLAUDE_SCREEN.format(composer="half-typed thought")) == ("draft", "half-typed thought")
+    assert cs(CLAUDE_SCREEN.format(composer="half-typed thought")) == ("draft", "draft present (18 chars)")   # the text itself is never reported
     multiline = CLAUDE_SCREEN.format(composer="") .replace("────────\n  ◤", "  second line of a draft\n────────\n  ◤", 1)
     assert cs(multiline)[0] == "draft"
     assert cs("❯ \n  ?\n────────\n")[0] == "draft"          # one-character draft is still a draft
@@ -2264,13 +2264,13 @@ def test_merge_snapshot_keeps_the_richer_record_for_a_bare_restored_pane(fake: F
     restore(fake)
     sleeper.merge_snapshot(fake.agents)
     row = snap_row()
-    assert row["argv"] == [*FLAGS, "--resume", UUID]                       # not overwritten by the bare relaunch
+    assert row["argv"] == FLAGS                       # not overwritten by the bare relaunch
     assert row["terminal_id"] == OLD_TERM and row["seen_at"] == "2026-10-08T10:00:00"   # the observation it is
     marker = row["repair"]
     assert marker["state"] == "pending" and marker["terminal_id"] == NEW_TERM and marker["from_terminal"] == OLD_TERM
     sleeper.merge_snapshot(fake.agents)                                    # idempotent: the window does not restart
     assert snap_row()["repair"]["first_seen_ts"] == marker["first_seen_ts"]
-    assert snap_row()["argv"] == [*FLAGS, "--resume", UUID]
+    assert snap_row()["argv"] == FLAGS
 
 
 def test_bare_claude_in_the_same_terminal_is_recorded_as_it_is(fake: FakeHerdr) -> None:
@@ -2279,14 +2279,14 @@ def test_bare_claude_in_the_same_terminal_is_recorded_as_it_is(fake: FakeHerdr) 
     fake.agents[0]["terminal_id"] = OLD_TERM
     fake.argv = ["--resume", UUID]
     sleeper.merge_snapshot(fake.agents)
-    assert snap_row()["argv"] == ["--resume", UUID] and "repair" not in snap_row()
+    assert snap_row()["argv"] == [] and "repair" not in snap_row()
 
 
 def test_merge_snapshot_without_repair_records_the_live_argv(fake: FakeHerdr) -> None:
     record()
     restore(fake)
     sleeper.merge_snapshot(fake.agents, repair=False)
-    assert snap_row()["argv"] == ["--resume", UUID] and "repair" not in snap_row()
+    assert snap_row()["argv"] == [] and "repair" not in snap_row()
 
 
 def test_merge_snapshot_does_not_use_a_record_kept_under_another_pane(fake: FakeHerdr) -> None:
@@ -2295,8 +2295,8 @@ def test_merge_snapshot_does_not_use_a_record_kept_under_another_pane(fake: Fake
     record(pane="w9:p9")                       # recorded under a pane id that is not the live one
     restore(fake)
     sleeper.merge_snapshot(fake.agents)
-    assert snap_row()["argv"] == ["--resume", UUID] and "repair" not in snap_row()    # recorded as it is: nothing to restore
-    assert snap_row("w9:p9")["argv"] == [*FLAGS, "--resume", UUID]                    # the old row is left alone
+    assert snap_row()["argv"] == [] and "repair" not in snap_row()    # recorded as it is: nothing to restore
+    assert snap_row("w9:p9")["argv"] == [*FLAGS, "--resume", UUID]   # the old row is left alone, as it was seeded
 
 
 def test_merge_snapshot_process_info_hiccup_keeps_a_pending_repair(fake: FakeHerdr) -> None:
@@ -2305,7 +2305,7 @@ def test_merge_snapshot_process_info_hiccup_keeps_a_pending_repair(fake: FakeHer
     sleeper.merge_snapshot(fake.agents)
     fake.process_info_broken = True
     sleeper.merge_snapshot(fake.agents)
-    assert snap_row()["argv"] == [*FLAGS, "--resume", UUID] and snap_row()["repair"]["state"] == "pending"
+    assert snap_row()["argv"] == FLAGS and snap_row()["repair"]["state"] == "pending"
 
 
 def test_merge_snapshot_drops_a_pending_marker_when_the_pane_is_gone(fake: FakeHerdr) -> None:
@@ -2315,7 +2315,7 @@ def test_merge_snapshot_drops_a_pending_marker_when_the_pane_is_gone(fake: FakeH
     fake.agents[0].pop("agent")
     fake.agents[0].pop("agent_session")
     sleeper.merge_snapshot(fake.agents)
-    assert "repair" not in snap_row() and snap_row()["argv"] == [*FLAGS, "--resume", UUID]   # the handle stays
+    assert "repair" not in snap_row() and snap_row()["argv"] == FLAGS   # the handle stays
 
 
 def test_find_journal_entry_does_not_recover_the_repair_marker(fake: FakeHerdr) -> None:
@@ -2323,7 +2323,7 @@ def test_find_journal_entry_does_not_recover_the_repair_marker(fake: FakeHerdr) 
     restore(fake)
     sleeper.merge_snapshot(fake.agents)
     hit = sleeper.find_journal_entry("a")
-    assert hit and hit[2] and "repair" not in hit[1] and hit[1]["argv"] == [*FLAGS, "--resume", UUID]
+    assert hit and hit[2] and "repair" not in hit[1] and hit[1]["argv"] == FLAGS
 
 
 @pytest.mark.parametrize(
@@ -2407,7 +2407,7 @@ def test_restore_repair_is_one_attempt_per_session_and_terminal(fake: FakeHerdr)
     tick()
     assert len(fake.signals) == 1 and len(starts(fake)) == 1
     row = snap_row()
-    assert row["argv"] == ["--resume", UUID] and row["terminal_id"] == NEW_TERM and row["repair"]["state"] == "repaired"
+    assert row["argv"] == [] and row["terminal_id"] == NEW_TERM and row["repair"]["state"] == "repaired"
 
 
 def test_restore_repair_runs_again_after_the_next_restart(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2416,7 +2416,7 @@ def test_restore_repair_runs_again_after_the_next_restart(fake: FakeHerdr, monke
     restore(fake)
     tick()
     tick()
-    assert snap_row()["argv"] == [*FLAGS, "--resume", UUID] and snap_row()["terminal_id"] == NEW_TERM
+    assert snap_row()["argv"] == FLAGS and snap_row()["terminal_id"] == NEW_TERM
     monkeypatch.setattr(sleeper, "herdr_server_started", lambda: LATER_START)   # a second server run ...
     restore(fake, THIRD_TERM)                     # ... whose restore allocated this terminal
     tick()
@@ -2478,7 +2478,7 @@ def test_restore_repair_waits_on_every_gate_then_repairs(gate: str, fake: FakeHe
     assert fake.signals == [] and starts(fake) == [] and "w1:p1" not in journal()
     row = snap_row()
     assert row["repair"]["state"] == "pending" and needle in row["repair"]["reason"]
-    assert row["argv"] == [*FLAGS, "--resume", UUID]                         # the flags survive the wait
+    assert row["argv"] == FLAGS                         # the flags survive the wait
     unblock(fake, state, monkeypatch)
     tick()
     assert len(fake.signals) == 1 and events() == ["repaired"] and snap_row()["repair"]["state"] == "repaired"
@@ -2495,7 +2495,7 @@ def test_a_second_live_pane_of_the_session_holds_the_repair_back_and_its_bare_ro
     tick()
     assert fake.signals == [] and starts(fake) == []
     assert snap_row()["repair"]["state"] == "pending" and "also open in w1:p2" in snap_row()["repair"]["reason"]
-    assert "repair" not in snap_row("w1:p2") and snap_row("w1:p2")["argv"] == ["--resume", UUID]
+    assert "repair" not in snap_row("w1:p2") and snap_row("w1:p2")["argv"] == []
     fake.agents.pop()
     tick()
     assert fake.signals == [] and starts(fake) == [] and "repair" not in snap_row()
@@ -2518,7 +2518,7 @@ def test_restore_repair_gives_up_after_the_window(fake: FakeHerdr, monkeypatch: 
     tick()
     tick()
     assert fake.signals == [] and events() == ["repair-gave-up"]            # settled: never retried
-    assert snap_row()["argv"] == ["--resume", UUID]                         # and the live argv is recorded as it is
+    assert snap_row()["argv"] == []                         # and the live argv is recorded as it is
 
 
 def test_restore_repair_window_is_configurable(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2542,7 +2542,7 @@ def test_restore_repair_off_leaves_the_snapshot_and_the_pane_alone(fake: FakeHer
     restore(fake)
     tick(repair_config(repair_flags=False))
     assert fake.signals == [] and starts(fake) == []
-    assert snap_row()["argv"] == ["--resume", UUID] and "repair" not in snap_row()
+    assert snap_row()["argv"] == [] and "repair" not in snap_row()
 
 
 def test_restore_repair_does_not_depend_on_the_managed_agents(fake: FakeHerdr) -> None:
@@ -2948,7 +2948,7 @@ def test_merge_snapshot_records_every_kind_and_keeps_the_richer_record(
     setup_kind(fake, kind, binary, flags, theirs, prefix)
     sleeper.merge_snapshot(fake.agents, repair=True)
     row = snap_row()
-    assert row["kind"] == kind and row["argv"] == [*flags, *theirs]          # the richer record survives the restart
+    assert row["kind"] == kind and row["argv"] == flags          # the richer record survives the restart
     assert row["repair"]["state"] == "pending" and row["terminal_id"] == OLD_TERM
 
 
@@ -2957,7 +2957,7 @@ def test_merge_snapshot_records_a_kind_it_cannot_repair_without_a_marker(fake: F
     fake.binary = None
     fake.argv = ["--session", UUID]
     sleeper.merge_snapshot(fake.agents, repair=True)
-    assert snap_row()["kind"] == "kimi" and snap_row()["argv"] == ["--session", UUID] and "repair" not in snap_row()
+    assert snap_row()["kind"] == "kimi" and snap_row()["argv"] == [] and "repair" not in snap_row()
 
 
 def test_merge_snapshot_ignores_kinds_herdr_never_relaunches(fake: FakeHerdr) -> None:
@@ -2969,7 +2969,7 @@ def test_merge_snapshot_ignores_kinds_herdr_never_relaunches(fake: FakeHerdr) ->
 def test_merge_snapshot_repair_set_limits_the_kinds(fake: FakeHerdr) -> None:
     setup_kind(fake, "codex", "codex", ["--oss"], ["resume", UUID], [])
     sleeper.merge_snapshot(fake.agents, repair={"claude"})
-    assert snap_row()["argv"] == ["resume", UUID] and "repair" not in snap_row()    # codex is not covered: recorded bare
+    assert snap_row()["argv"] == [] and "repair" not in snap_row()    # codex is not covered: recorded bare
 
 
 def test_snapshot_rows_of_kinds_that_cannot_sleep_are_no_wake_handle(fake: FakeHerdr) -> None:
@@ -3882,8 +3882,8 @@ def test_a_bare_resume_in_a_new_pane_is_not_mistaken_for_a_restore(fake: FakeHer
     tick()
     tick()
     assert fake.signals == [] and starts(fake) == [] and events() == []
-    assert "repair" not in snap_row("w1:p2") and snap_row("w1:p2")["argv"] == ["--resume", UUID]
-    assert snap_row("w1:p1")["argv"] == [*FLAGS, "--resume", UUID]               # the old record is untouched
+    assert "repair" not in snap_row("w1:p2") and snap_row("w1:p2")["argv"] == []
+    assert snap_row("w1:p1")["argv"] == [*FLAGS, "--resume", UUID]   # the old record is untouched, as seeded
 
 
 @pytest.mark.parametrize("terminal, seen, why", [
@@ -3898,7 +3898,7 @@ def test_the_same_pane_id_is_not_enough_without_the_age_evidence(
     restore(fake, terminal)
     tick()
     assert fake.signals == [] and starts(fake) == [] and "repair" not in snap_row(), why
-    assert snap_row()["argv"] == ["--resume", UUID]                              # recorded as it is
+    assert snap_row()["argv"] == []                              # recorded as it is
 
 
 def test_no_repair_when_the_servers_start_is_unknown(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4253,8 +4253,8 @@ def test_bypass_class_is_declared_in_the_kinds_table_and_repair_bypass_defaults_
     assert sleeper.without_bypass("codex", ["-a", "never", "--oss", "-m", "x"]) == (["--oss", "-m", "x"], ["-a"])
     assert sleeper.without_bypass("qwen", ["--approval-mode=yolo", "--model", "m"]) == (["--model", "m"], ["--approval-mode"])
     for kind, spec in sleeper.KINDS.items():
-        assert spec["bypass"] <= (spec["values"] | spec["bools"] | spec["strip_value"] | spec["refused"]
-                                  | sleeper.BOOLEAN_OPTIONS | sleeper.VALUE_OPTIONS), kind
+        known = (sleeper.BOOLEAN_OPTIONS | sleeper.VALUE_OPTIONS if kind == "claude" else spec["values"] | spec["bools"])
+        assert spec["bypass"] <= known, (kind, sorted(spec["bypass"] - known))   # a bypass flag the kind can replay
 
 
 def test_repair_bypass_is_a_boolean_config_key(state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4290,14 +4290,32 @@ def test_a_refusal_reason_names_the_option_never_its_value() -> None:
     assert "sk-secret" not in (sleeper.replayable_argv(["sk-secret prompt"], "claude")[1] or "")
 
 
+class TtyErr:
+    """A stderr that says it is a terminal (what a person running `herdr-sleeper wake` has)."""
+    def __init__(self) -> None:
+        self.text = ""
+
+    def isatty(self) -> bool:
+        return True
+
+    def write(self, data: str) -> int:
+        self.text += data
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+
 def test_the_manual_resume_line_keeps_values_for_the_operator_but_the_log_masks_them(
-        state: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     entry = {"pane_id": "w1:p1", "uuid": UUID, "kind": "claude", "cwd": "/tmp/p",
              "argv": ["--model", "secretval", "--resume", UUID]}
     line = sleeper.manual_command(entry)
     assert "secretval" in line
+    tty = TtyErr()
+    monkeypatch.setattr(sleeper.sys, "stderr", tty)
     sleeper.say(f"cannot wake: Manual: {line}")
-    assert "secretval" in capsys.readouterr().err                          # shown whole to the operator
+    assert "secretval" in tty.text                                         # a terminal gets it whole, to paste
     logged = sleeper.LOGFILE.read_text()
     assert "secretval" not in logged and "--model" in logged and UUID in logged
 
@@ -4341,3 +4359,106 @@ def test_a_hostile_session_id_is_never_slept(fake: FakeHerdr) -> None:
     fake.agents[0]["agent_session"] = {"value": "x';touch /tmp/pwn;'"}
     assert sleeper.sleep_agent(fake.agents[0], 12, set(), dry_run=False)[0] is False
     assert fake.signals == [] and not any(c[:2] == ("pane", "run") for c in fake.calls)
+
+
+# ============================================ v0.1.2 review round 3 (bypass lists, draft text, filtered argv, stderr)
+
+ADDED_BYPASS = [
+    ("claude", "--add-dir", True), ("claude", "--permission-prompt-tool", True),
+    ("codex", "-c", True), ("codex", "--config", True), ("codex", "-p", True), ("codex", "--profile", True),
+    ("codex", "--add-dir", True), ("codex", "--search", False),
+    ("copilot", "--allow-tool", True), ("copilot", "--allow-url", True), ("copilot", "--autopilot", False),
+    ("copilot", "--add-dir", True),
+    ("qwen", "--allowed-tools", True), ("qwen", "--include-directories", True), ("qwen", "--add-dir", True),
+    ("omp", "--plan-yolo-into", True), ("omp", "--allow-home", False), ("omp", "--add-dir", True),
+    ("cursor", "--sandbox", True), ("cursor", "--auto-review", False), ("cursor", "--add-dir", True),
+    ("agy", "--mode", True), ("agy", "--add-dir", True),
+]
+SAFE_OPTION = {"claude": "--model", "codex": "-m", "copilot": "--model", "qwen": "-m", "omp": "--model",
+               "cursor": "--model", "agy": "--model"}
+
+
+def spelled(flag: str, takes_value: bool, how: str) -> list[str]:
+    value = "sandbox_mode=danger-full-access" if flag in ("-c", "--config") else "v1"
+    if not takes_value:
+        return [flag]
+    return [f"{flag}={value}"] if how == "eq" else [flag, value]
+
+
+@pytest.mark.parametrize("how", ["eq", "separate"])
+@pytest.mark.parametrize("kind, flag, takes_value", ADDED_BYPASS)
+def test_each_added_bypass_flag_is_dropped_without_repair_bypass_and_kept_with_it(
+        kind: str, flag: str, takes_value: bool, how: str) -> None:
+    assert flag in sleeper.KINDS[kind]["bypass"]
+    safe = [SAFE_OPTION[kind], "m1"]
+    argv = [*safe, *spelled(flag, takes_value, how)]
+    extras, why = sleeper.replayable_argv(argv, kind)
+    assert extras == argv, why                                    # repair_bypass on: the whole record comes back
+    kept, dropped = sleeper.without_bypass(kind, extras)          # repair_bypass off: the flag and its value go
+    assert kept == safe and dropped == [flag]
+
+
+def test_codex_config_and_profile_are_bypass_class_in_both_spellings() -> None:
+    for argv in (["-c", "approval_policy=never"], ["--config=sandbox_mode=danger-full-access"], ["-p", "work"],
+                 ["--profile=work"], ["-c=sandbox_mode=read-only"]):
+        extras, why = sleeper.replayable_argv(["--oss", *argv], "codex")
+        assert extras == ["--oss", *argv], why
+        assert sleeper.without_bypass("codex", extras)[0] == ["--oss"]
+
+
+def test_cursor_sandbox_goes_with_its_value_whatever_the_value() -> None:
+    for value in ("disabled", "enabled"):
+        assert sleeper.without_bypass("cursor", ["--sandbox", value, "--model", "m"]) == (["--model", "m"], ["--sandbox"])
+    assert sleeper.without_bypass("cursor", ["--sandbox=disabled"]) == ([], ["--sandbox"])
+
+
+def test_claude_repair_leaves_a_widened_path_out_without_the_opt_in(fake: FakeHerdr) -> None:
+    record(flags=["--model", "haiku", "--add-dir", "/outside"])
+    restore(fake)
+    tick(repair_config(repair_bypass=False))
+    start = starts(fake)[0]
+    assert start[start.index("--") + 1:] == ("--model", "haiku", "--resume", UUID)
+    assert json.loads(sleeper.EVENTS.read_text().splitlines()[-1])["flags"] == ["--model"]
+
+
+def test_claude_repair_puts_a_widened_path_back_with_the_opt_in(fake: FakeHerdr) -> None:
+    record(flags=["--model", "haiku", "--add-dir=/outside"])
+    restore(fake)
+    tick(repair_config(repair_bypass=True))
+    start = starts(fake)[0]
+    assert start[start.index("--") + 1:] == ("--model", "haiku", "--add-dir=/outside", "--resume", UUID)
+
+
+def test_a_typed_draft_never_reaches_the_log_the_panes_file_or_the_events(fake: FakeHerdr) -> None:
+    secret = "my private plan"
+    record()
+    restore(fake)
+    fake.screen = f"⏺ pong\n────────\n❯ {secret}\n────────\n  ◤ graft\n"
+    tick()
+    assert fake.signals == []
+    assert snap_row()["repair"]["reason"] == f"composer draft: draft present ({len(secret)} chars)"
+    for path in (sleeper.LOGFILE, sleeper.SNAPSHOT, sleeper.EVENTS):
+        assert secret not in (path.read_text() if path.exists() else ""), path
+    below = sleeper.composer_state("⏺ pong\n────────\n❯\nsecond line secret\n")
+    assert below == ("draft", "draft present (18 chars)")
+
+
+def test_panes_json_keeps_only_the_replayable_flags_of_the_live_argv(fake: FakeHerdr) -> None:
+    fake.argv = ["--model", "sk-flag-value", "--resume", UUID]
+    sleeper.merge_snapshot(fake.agents, repair=True)
+    assert snap_row()["argv"] == ["--model", "sk-flag-value"]            # no resume tokens, only what a repair may replay
+    fake.argv = ["--print", "a private prompt text", "--resume", UUID]
+    sleeper.merge_snapshot(fake.agents, repair=True)
+    assert snap_row()["argv"] is None
+    assert "a private prompt text" not in sleeper.SNAPSHOT.read_text()
+    tick()
+    assert fake.signals == [] and starts(fake) == []                     # a null argv is nothing to replay
+
+
+def test_stderr_gets_the_masked_manual_line_unless_it_is_a_terminal(
+        state: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    entry = {"pane_id": "w1:p1", "uuid": UUID, "kind": "claude", "cwd": "/tmp/p",
+             "argv": ["--model", "secretval", "--resume", UUID]}
+    sleeper.say(f"cannot wake: Manual: {sleeper.manual_command(entry)}")   # a hook, an action or the watcher: not a tty
+    err = capsys.readouterr().err
+    assert "secretval" not in err and "--model" in err and UUID in err

@@ -121,7 +121,7 @@ rounds, the live-deployment iteration, and the v0.1.1 review (Fable, Grok):
    time) at the repair is a relaunch by the operator, settled `relaunched` and left alone (an unreadable pid or
    start time never repairs); the agent must stay idle through one unchanged state_change_seq for
    REPAIR_IDLE_DWELL_SECONDS (60) first; the options a KINDS entry lists as `bypass` (permission or sandbox
-   skipping) come back only under `[restore] repair_bypass = true` (default off): otherwise the other recorded
+   skipping, or widening the allowed tools, paths or urls; codex's -c/--config and -p/--profile too) come back only under `[restore] repair_bypass = true` (default off): otherwise the other recorded
    flags are restored without them, and a record of bypass flags alone repairs nothing. No kind's unlisted
    option replays (an unlisted `--long=value` could carry a secret); option values are never logged.
    Not covered: an operator relaunch made before the restore was noticed looks the same as Herdr's own launch.
@@ -326,13 +326,19 @@ def _kind(binary: str, resume: tuple[str, str], strip: dict | None = None, value
             "bools": frozenset(bools.split()), "refused": frozenset(refused.split())}
 
 
+# devin, droid, qodercli, grok, kimi, mastracode, pi, kilo and letta: "none" mode, nothing but the resume tokens
+# is ever replayed, so they have no bypass list. `pi --help` 1.6.0 was read: its -a/--approve trusts
+# project-local files; it is not replayed. The others are not installed here (not checked).
 def _unread(binary: str, resume: tuple[str, str], strip_value: tuple[str, ...] = ()) -> dict:
     return _kind(binary, resume, {"value": (resume[1], *strip_value)}, mode="none", verified=False)
 
 
 KINDS: dict[str, dict] = {
     "claude": _kind("claude", ("flag", "--resume"), {"value": ("--resume", "-r"), "bare": ("--continue", "-c")},
-                    mode="allow", composer="claude", bypass="--dangerously-skip-permissions"),
+                    mode="allow", composer="claude",
+                    # checked against `claude --help` 2.1.330: --add-dir widens the readable paths and
+                    # --permission-prompt-tool hands permission prompts to another tool
+                    bypass="--dangerously-skip-permissions --add-dir --permission-prompt-tool"),
     "codex": _kind(
         "codex", ("sub", "resume"), {"bare": ("--last", "--all", "--include-non-interactive")},
         values="-c --config --enable --disable --remote --remote-auth-token-env -m --model --local-provider -p "
@@ -340,8 +346,11 @@ KINDS: dict[str, dict] = {
         bools="--oss --approve-for-me --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust "
               "--search --no-alt-screen --no-daemon --strict-config",
         refused="-i --image --worktree -V --version -h --help",
+        # checked against `codex --help` codex-cli 0.171.0. -c/--config can set sandbox_mode or approval_policy
+        # and -p/--profile layers a config file, so both are bypass-class as a whole; --search needs no per-call
+        # approval; --add-dir widens the writable paths
         bypass="--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --approve-for-me "
-               "-a --ask-for-approval -s --sandbox"),
+               "-a --ask-for-approval -s --sandbox -c --config -p --profile --add-dir --search"),
     "copilot": _kind(
         "copilot", ("eq", "--resume"), {"optional": ("--resume", "-r"), "bare": ("--continue",)},
         values="--model --reasoning-effort --context --auto-tier --agent -n --name -C --log-dir --log-level "
@@ -356,7 +365,11 @@ KINDS: dict[str, dict] = {
               "--no-color --no-bash-env --no-mouse --no-remote --no-remote-export --remote --remote-export",
         refused="-p --prompt -i --interactive -s --silent --session-id --connect --acp --share --share-gist "
                 "--attachment --output-format --usage-output-file -v --version -h --help",
-        bypass="--yolo --allow-all --allow-all-tools --allow-all-paths --allow-all-urls --no-ask-user"),
+        # NOT checked against help this round: `copilot` is not installed here (the lists above were read when
+        # verified=True was set). Widened by name: --allow-tool/--allow-url allow tools and urls unasked,
+        # --autopilot works without prompts, --add-dir widens the paths
+        bypass="--yolo --allow-all --allow-all-tools --allow-all-paths --allow-all-urls --no-ask-user "
+               "--allow-tool --allow-url --autopilot --add-dir"),
     "devin": _unread("devin", ("flag", "--resume")),
     "droid": _unread("droid", ("flag", "--resume")),
     "qodercli": _unread("qodercli", ("flag", "--resume")),
@@ -380,19 +393,23 @@ KINDS: dict[str, dict] = {
         refused="-p --prompt -i --prompt-interactive --session-id --fork-session --acp --channel -o "
                 "--output-format --input-format --include-partial-messages --json-fd --json-file --json-schema "
                 "--input-file -l --list-extensions --worktree --openai-api-key -v --version -h --help",
-        bypass="-y --yolo --approval-mode --insecure"),
+        # NOT checked against help: `qwen` is not installed here. --allowed-tools and the extra directories
+        # widen what runs without asking
+        bypass="-y --yolo --approval-mode --insecure --allowed-tools --include-directories --add-dir"),
     "hermes": _kind(
         "hermes", ("flag", "--resume"), {"value": ("--resume", "-r"), "named": ("--continue", "-c")},
         values="-m --model --provider --reasoning -t --toolsets --in -s --skills",
         bools="--no-restore-cwd --accept-hooks --yolo --pass-session-id --ignore-user-config --ignore-rules "
               "--safe-mode --tui --cli --dev",
         refused="-z --oneshot --usage-file -w --worktree -V --version -h --help",
+        # checked against `hermes --help` Hermes Agent v0.22.2 (nothing else there skips an approval)
         bypass="--yolo --accept-hooks"),
     "opencode": _kind(
         "opencode", ("flag", "-s"), {"value": ("--session", "-s"), "bare": ("--continue", "-c")},
         values="--log-level --port --hostname --mdns-domain --cors -m --model --agent --replay-limit",
         bools="--print-logs --pure --mdns --auto --mini --no-replay",
         refused="--fork --prompt -v --version -h --help",
+        # NOT checked against help: `opencode` is not installed here
         bypass="--auto"),
     "omp": _kind(
         "omp", ("eq", "--resume"), {"optional": ("--resume", "-r"), "bare": ("--continue", "-c")},
@@ -405,21 +422,27 @@ KINDS: dict[str, dict] = {
               "--print-thoughts --no-ui",
         refused="--goal --alias -p --print --from-claude --from-codex --export --no-session --mode --api-key "
                 "-v --version -h --help",
-        bypass="--auto-approve --plan-yolo --approval-mode"),
+        # NOT checked against help: `omp` is not installed here. --plan-yolo-into runs the plan unasked,
+        # --allow-home lets it into the home directory, --add-dir widens the paths
+        bypass="--auto-approve --plan-yolo --plan-yolo-into --approval-mode --allow-home --add-dir"),
     "cursor": _kind(
         "cursor-agent", ("flag", "--resume"), {"optional": ("--resume",), "bare": ("--continue",)},
         values="-e --endpoint --model --mode --sandbox --workspace --add-dir --plugin-dir --output-format",
         bools="--stream-partial-output --plan -f --force --yolo --auto-review --approve-mcps --trust",
         refused="--api-key -H --header -p --print --list-models -w --worktree --worktree-base "
                 "--skip-worktree-setup -v --version -h --help",
-        bypass="-f --force --yolo --trust --approve-mcps"),
+        # checked against `cursor-agent --help` 2026.11.11. --sandbox takes enabled or disabled: the option and
+        # its value are dropped together; --auto-review auto-runs the calls its classifier finds safe
+        bypass="-f --force --yolo --trust --approve-mcps --sandbox --auto-review --add-dir"),
     "agy": _kind(
         "agy", ("flag", "--conversation"), {"value": ("--conversation",), "bare": ("-c", "--continue")},
         values="--add-dir --agent --effort --model --mode --project --log-file",
         bools="--dangerously-skip-permissions --disable-slash-commands --remote-control --sandbox",
         refused="-p --print --prompt -i --prompt-interactive --input-format --json-schema --output-format "
                 "--print-timeout --new-project -h --help",
-        bypass="--dangerously-skip-permissions"),
+        # checked against `agy --help` 1.5.14 (printed on stderr). --mode auto/accept-edits skips prompts;
+        # agy's --sandbox only restricts, so it is not listed
+        bypass="--dangerously-skip-permissions --mode --add-dir"),
 }
 
 
@@ -511,7 +534,13 @@ def open_private_append(path: Path):  # type: ignore[no-untyped-def]
 
 
 def say(msg: str) -> None:
-    """Diagnostics: to the log always, to the caller's stdout too."""
+    """Diagnostics: to the log always, to stderr too.
+
+    Both get the masked copy of a manual resume line (option values hidden) unless stderr is a terminal: a person
+    running `herdr-sleeper wake` there wants the full command to paste, while a hook, a plugin action or the
+    watcher has stderr on a pipe or /dev/null that Herdr may keep. (The `print`ed manual lines of the interactive
+    commands are always full.)
+    """
     logged = msg
     for full, masked in LOG_MASKS.items():
         logged = logged.replace(full, masked)
@@ -522,7 +551,11 @@ def say(msg: str) -> None:
             fh.write(line + "\n")
     except OSError:
         pass
-    print(msg, file=sys.stderr)
+    try:
+        interactive = sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        interactive = False
+    print(msg if interactive else logged, file=sys.stderr)
 
 
 def stamp(ts: float | None = None) -> str:
@@ -1141,11 +1174,11 @@ def composer_state(screen: str | None) -> tuple[str, str]:
         if stripped.startswith(PROMPT_GLYPHS):
             draft = stripped[1:].strip()
             if draft:
-                return "draft", draft[:60]
+                return "draft", f"draft present ({len(draft)} chars)"
             rest = [ln.strip() for ln in lines[idx + 1:]]
             below = [ln for ln in rest if not (ln.startswith(FOOTER_PREFIXES) or set(ln) <= {"─"})]
             if below:
-                return "draft", below[0][:60]
+                return "draft", f"draft present ({len(below[0])} chars)"
             if not rest:  # a bare glyph with nothing rendered under it is not a composer we can vouch for
                 return "unknown", "no footer below the prompt"
             return "empty", ""
@@ -1533,9 +1566,13 @@ def merge_snapshot(agents: list[dict], repair: bool | set[str] | frozenset[str] 
         hiccup = argv is None and present is None and prior.get("uuid") == uuid
         if hiccup:
             argv = prior.get("argv")  # process-info hiccup: keep what we knew rather than erase it
+        # only the replayable flags are kept: a positional prompt or a refused option's value (an --api-key=) never
+        # reaches panes.json. Every reader runs replayable_argv again (idempotent on its own output); a refused
+        # argv is stored as null, which every reader treats as "nothing to replay"
+        kept = None if argv is None else replayable_argv(argv, kind)[0]
         row = {
             "kind": kind, "uuid": uuid, "name": a.get("name"), "cwd": a.get("cwd"),
-            "title": a.get("terminal_title_stripped"), "argv": argv,
+            "title": a.get("terminal_title_stripped"), "argv": kept,
             "terminal_id": a.get("terminal_id"),
             "seen_at": stamp(),
         }
@@ -1551,6 +1588,8 @@ def merge_snapshot(agents: list[dict], repair: bool | set[str] | frozenset[str] 
             src = lost[1] if lost is not None else prior
             row.update({k: src[k] for k in ("argv", "terminal_id", "seen_at", "cwd") if src.get(k) is not None})
             row["name"] = row["name"] or src.get("name")
+            if isinstance(row.get("argv"), list):  # a record an older version kept raw is rewritten filtered
+                row["argv"] = replayable_argv([str(x) for x in row["argv"]], kind)[0]
             row["repair"] = marker or {"terminal_id": a.get("terminal_id"), "state": REPAIR_PENDING,
                                        "first_seen": stamp(), "first_seen_ts": time.time(),
                                        "from_terminal": src.get("terminal_id"), **agent_identity(pid)}
