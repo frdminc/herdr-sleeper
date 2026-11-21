@@ -1472,6 +1472,37 @@ def test_stub_filters_recovered_argv(fake: FakeHerdr, monkeypatch: pytest.Monkey
     assert sleeper.cmd_stub("w1:p1", UUID) == 0 and "w1:p1" in journal()
 
 
+def test_stub_refuses_an_unknown_argv_instead_of_inventing_one(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch,
+                                                               capsys: pytest.CaptureFixture[str]) -> None:
+    stub_ready(fake, monkeypatch)
+    j = journal(); j["w1:p1"]["argv"] = None; sleeper.write_json(sleeper.JOURNAL, j)
+    monkeypatch.setattr(sleeper.os, "execvp", lambda b, a: pytest.fail("exec with an invented argv"))
+    assert sleeper.cmd_stub("w1:p1", UUID) == 0
+    assert "w1:p1" in journal() and "refusing to invent" in capsys.readouterr().out
+
+
+def test_stub_refuses_when_the_pane_moved_to_another_cwd(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch,
+                                                         capsys: pytest.CaptureFixture[str]) -> None:
+    stub_ready(fake, monkeypatch)
+    monkeypatch.setattr(sleeper.os, "getcwd", lambda: "/somewhere/else")
+    monkeypatch.setattr(sleeper.os, "execvp", lambda b, a: pytest.fail("exec from the wrong directory"))
+    fake.calls.clear()
+    assert sleeper.cmd_stub("w1:p1", UUID) == 0
+    out = capsys.readouterr().out
+    assert "w1:p1" in journal() and journal()["w1:p1"]["phase"] == "asleep"   # the handle is kept
+    assert "slept-in" in out and "manual:" in out
+    assert any(c[:2] == ("pane", "release-agent") for c in fake.calls)         # the shell is the user's again
+
+
+def test_stub_leaves_the_row_alone_when_it_changed_while_the_prompt_waited(
+        fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    stub_ready(fake, monkeypatch)
+    j = journal(); j["w1:p1"]["phase"] = "waking"; j["w1:p1"]["waking_pid"] = 1; sleeper.write_json(sleeper.JOURNAL, j)
+    monkeypatch.setattr(sleeper.os, "execvp", lambda b, a: pytest.fail("second resume of a waking row"))
+    assert sleeper.cmd_stub("w1:p1", UUID) == 0
+    assert journal()["w1:p1"]["phase"] == "waking" and "changed while waiting" in capsys.readouterr().out
+
+
 def test_stub_rechecks_under_the_lock(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
     stub_ready(fake, monkeypatch)
     calls: list[str | None] = []
