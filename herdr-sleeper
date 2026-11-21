@@ -101,7 +101,7 @@ rounds, the live-deployment iteration, and the v0.1.1 review (Fable, Grok):
    gate is retried until `[restore] repair_window_minutes` (30) after it was first noticed, then given up on
    (logged). Each (session, terminal) gets one attempt, so a pane started bare by hand is left alone after
    it. The journal record is written before the exit and finished only after the start succeeded; the agent
-   name and the manual pane label are kept. `[restore] repair_flags = false` turns it off, `repair_kinds`
+   name and the manual pane label are kept. `[restore] repair_flags = false` turns it off (it is on by default), `repair_kinds`
    narrows it (default: every kind in KINDS but codex, which must be named; whatever `agents` says: `agents`
    only governs sleeping). The restart evidence is proof, not a changed terminal id: the record sits under
    this very pane's snapshot key, and the live terminal's id (it embeds its creation time) is born right
@@ -116,6 +116,15 @@ rounds, the live-deployment iteration, and the v0.1.1 review (Fable, Grok):
    no screen signal is reliable, so a typed draft would be lost to the exit (SIGTERM, as for sleeping): the
    remaining gates are all that stands between a repair and a draft. A repair is a second resume of the
    session (two transcript replays): the price of getting the flags back, which nothing else can do.
+   Guards added in v0.1.2 after review: `exclude` keeps a pane out of repair as it does out of sleep; the agent's
+   pid and start time are recorded when the restore is noticed and a pane whose agent has another pid (or start
+   time) at the repair is a relaunch by the operator, settled `relaunched` and left alone (an unreadable pid or
+   start time never repairs); the agent must stay idle through one unchanged state_change_seq for
+   REPAIR_IDLE_DWELL_SECONDS (60) first; the options a KINDS entry lists as `bypass` (permission or sandbox
+   skipping) come back only under `[restore] repair_bypass = true` (default off): otherwise the other recorded
+   flags are restored without them, and a record of bypass flags alone repairs nothing. No kind's unlisted
+   option replays (an unlisted `--long=value` could carry a secret); option values are never logged.
+   Not covered: an operator relaunch made before the restore was noticed looks the same as Herdr's own launch.
 
 9. The watcher reloads itself. Once per tick, before the tick's work and with no transaction open, it compares
    the script's code stamp with the one it started with. A changed stamp is acted on only when the same stamp
@@ -242,6 +251,7 @@ RESTORE_DEFAULTS = {
     "repair_flags": True,              # relaunch an agent pane that Herdr's restore brought back without its flags
     "repair_window_minutes": 30.0,     # keep trying a pane that fails a gate this long after the restart, then give up
     "repair_kinds": None,              # which agent kinds to repair; None (the default) is every kind in KINDS but REPAIR_OPT_IN
+    "repair_bypass": False,            # also re-add the flags a KINDS entry marks `bypass` (skip permission prompts or sandboxing)
     "require_empty_composer": True,    # a kind with a composer detector must show an empty input box (see composer_refusal)
 }
 
@@ -294,18 +304,22 @@ PROFILES: dict[str, dict] = {
 #             print, prompt, fork, new-state and secret-bearing options that must never be replayed. All three
 #             come from the CLI's own `--help` on this machine, see `verified`.
 #   mode      "allow": claude's own allow-list (REFUSED/BOOLEAN/VALUE_OPTIONS below, unchanged since v0.1).
-#             "deny": a long option nobody listed is a boolean (a positional after it, a prompt or the value of
-#             an option we misfiled, is refused, so a mistake fails closed); an unlisted SHORT option is
-#             refused (it could be `-p`). "none": the CLI was not available to read, so nothing but the
+#             "deny": the kind's `values` and `bools` lists are an allow-list too (v0.1.2 review: an unlisted
+#             `--long=value` used to replay, secrets included): any option not in them is refused, which leaves
+#             that pane alone. "none": the CLI was not available to read, so nothing but the
 #             resume tokens may be in the argv: such a pane is recorded but never repaired.
 #   verified  True when `<binary> --help` was read on this machine; False means "none" mode, above.
+#   bypass    options that skip permission prompts or sandboxing (an option here is also listed in values/bools,
+#             or is claude's). Restore repair puts them back only under `[restore] repair_bypass = true`
+#             (default off); otherwise it restores the other recorded flags and leaves these out.
 #   composer  name of a pane-screen detector in COMPOSER_DETECTORS, or None where the screen gives no
 #             reliable signal (see composer_refusal).
 # In every mode: `--`, a positional argument (an initial prompt, a subcommand) and a missing value refuse.
 def _kind(binary: str, resume: tuple[str, str], strip: dict | None = None, values: str = "", bools: str = "",
-          refused: str = "", mode: str = "deny", verified: bool = True, composer: str | None = None) -> dict:
+          refused: str = "", mode: str = "deny", verified: bool = True, composer: str | None = None,
+          bypass: str = "") -> dict:
     strip = strip or {}
-    return {"binary": binary, "resume": resume, "mode": mode, "verified": verified, "composer": composer,
+    return {"bypass": frozenset(bypass.split()),"binary": binary, "resume": resume, "mode": mode, "verified": verified, "composer": composer,
             "strip_value": frozenset(strip.get("value", ())), "strip_optional": frozenset(strip.get("optional", ())),
             "strip_bare": frozenset(strip.get("bare", ())), "strip_named": frozenset(strip.get("named", ())),
             "values": frozenset(values.split()),
@@ -318,14 +332,16 @@ def _unread(binary: str, resume: tuple[str, str], strip_value: tuple[str, ...] =
 
 KINDS: dict[str, dict] = {
     "claude": _kind("claude", ("flag", "--resume"), {"value": ("--resume", "-r"), "bare": ("--continue", "-c")},
-                    mode="allow", composer="claude"),
+                    mode="allow", composer="claude", bypass="--dangerously-skip-permissions"),
     "codex": _kind(
         "codex", ("sub", "resume"), {"bare": ("--last", "--all", "--include-non-interactive")},
         values="-c --config --enable --disable --remote --remote-auth-token-env -m --model --local-provider -p "
                "--profile -s --sandbox -C --cd --add-dir -a --ask-for-approval",
         bools="--oss --approve-for-me --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust "
               "--search --no-alt-screen --no-daemon --strict-config",
-        refused="-i --image --worktree -V --version -h --help"),
+        refused="-i --image --worktree -V --version -h --help",
+        bypass="--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --approve-for-me "
+               "-a --ask-for-approval -s --sandbox"),
     "copilot": _kind(
         "copilot", ("eq", "--resume"), {"optional": ("--resume", "-r"), "bare": ("--continue",)},
         values="--model --reasoning-effort --context --auto-tier --agent -n --name -C --log-dir --log-level "
@@ -339,7 +355,8 @@ KINDS: dict[str, dict] = {
               "--allow-all-mcp-server-instructions --no-custom-instructions --no-auto-update --no-ask-user "
               "--no-color --no-bash-env --no-mouse --no-remote --no-remote-export --remote --remote-export",
         refused="-p --prompt -i --interactive -s --silent --session-id --connect --acp --share --share-gist "
-                "--attachment --output-format --usage-output-file -v --version -h --help"),
+                "--attachment --output-format --usage-output-file -v --version -h --help",
+        bypass="--yolo --allow-all --allow-all-tools --allow-all-paths --allow-all-urls --no-ask-user"),
     "devin": _unread("devin", ("flag", "--resume")),
     "droid": _unread("droid", ("flag", "--resume")),
     "qodercli": _unread("qodercli", ("flag", "--resume")),
@@ -362,18 +379,21 @@ KINDS: dict[str, dict] = {
               "--telemetry-log-prompts",
         refused="-p --prompt -i --prompt-interactive --session-id --fork-session --acp --channel -o "
                 "--output-format --input-format --include-partial-messages --json-fd --json-file --json-schema "
-                "--input-file -l --list-extensions --worktree --openai-api-key -v --version -h --help"),
+                "--input-file -l --list-extensions --worktree --openai-api-key -v --version -h --help",
+        bypass="-y --yolo --approval-mode --insecure"),
     "hermes": _kind(
         "hermes", ("flag", "--resume"), {"value": ("--resume", "-r"), "named": ("--continue", "-c")},
         values="-m --model --provider --reasoning -t --toolsets --in -s --skills",
         bools="--no-restore-cwd --accept-hooks --yolo --pass-session-id --ignore-user-config --ignore-rules "
               "--safe-mode --tui --cli --dev",
-        refused="-z --oneshot --usage-file -w --worktree -V --version -h --help"),
+        refused="-z --oneshot --usage-file -w --worktree -V --version -h --help",
+        bypass="--yolo --accept-hooks"),
     "opencode": _kind(
         "opencode", ("flag", "-s"), {"value": ("--session", "-s"), "bare": ("--continue", "-c")},
         values="--log-level --port --hostname --mdns-domain --cors -m --model --agent --replay-limit",
         bools="--print-logs --pure --mdns --auto --mini --no-replay",
-        refused="--fork --prompt -v --version -h --help"),
+        refused="--fork --prompt -v --version -h --help",
+        bypass="--auto"),
     "omp": _kind(
         "omp", ("eq", "--resume"), {"optional": ("--resume", "-r"), "bare": ("--continue", "-c")},
         values="--model --smol --slow --plan --prewalk-into --plan-yolo-into --provider --system-prompt "
@@ -384,20 +404,34 @@ KINDS: dict[str, dict] = {
               "--advisor --external-thinking --no-extensions --no-skills --no-rules --no-title --auto-approve "
               "--print-thoughts --no-ui",
         refused="--goal --alias -p --print --from-claude --from-codex --export --no-session --mode --api-key "
-                "-v --version -h --help"),
+                "-v --version -h --help",
+        bypass="--auto-approve --plan-yolo --approval-mode"),
     "cursor": _kind(
         "cursor-agent", ("flag", "--resume"), {"optional": ("--resume",), "bare": ("--continue",)},
         values="-e --endpoint --model --mode --sandbox --workspace --add-dir --plugin-dir --output-format",
         bools="--stream-partial-output --plan -f --force --yolo --auto-review --approve-mcps --trust",
         refused="--api-key -H --header -p --print --list-models -w --worktree --worktree-base "
-                "--skip-worktree-setup -v --version -h --help"),
+                "--skip-worktree-setup -v --version -h --help",
+        bypass="-f --force --yolo --trust --approve-mcps"),
     "agy": _kind(
         "agy", ("flag", "--conversation"), {"value": ("--conversation",), "bare": ("-c", "--continue")},
         values="--add-dir --agent --effort --model --mode --project --log-file",
         bools="--dangerously-skip-permissions --disable-slash-commands --remote-control --sandbox",
         refused="-p --print --prompt -i --prompt-interactive --input-format --json-schema --output-format "
-                "--print-timeout --new-project -h --help"),
+                "--print-timeout --new-project -h --help",
+        bypass="--dangerously-skip-permissions"),
 }
+
+
+SESSION_ID = re.compile(r"[A-Za-z0-9_/][A-Za-z0-9_.:@+=/-]{0,299}\Z")
+
+
+def valid_session_id(value: object) -> bool:
+    """A session id we will type into a shell line or put in an argv. Herdr gets it from the agent, so a pane's
+    own program chooses it: refuse anything but a plain token (no quotes, spaces, `;`, `$`, backslash, newline,
+    a leading `-`). Real ids seen: uuids, opencode `ses_...`, letta `default:<agent>`, and for pi and kimi a
+    session file path (so `/` passes; a path with a space is refused, fail closed)."""
+    return isinstance(value, str) and SESSION_ID.match(value) is not None
 
 
 def kind_binary(kind: str) -> str:
@@ -408,6 +442,8 @@ def resume_tokens(kind: str, uuid: str) -> list[str] | None:
     """The tokens that select this session, in the form KINDS gives for the kind; None for an unknown kind."""
     spec = KINDS.get(kind)
     if spec is None:
+        return None
+    if not valid_session_id(uuid):
         return None
     how, tok = spec["resume"]
     if kind == "letta" and uuid.startswith("default:"):  # Herdr: the default conversation of one agent
@@ -421,8 +457,24 @@ def resume_argv(kind: str, uuid: str, extra: list[str] | None = None) -> list[st
     return None if tokens is None else [*(extra or []), *tokens]
 
 
+def flag_names(tokens: list[str]) -> list[str]:
+    """Option names only, for logs, events and notifications: an option's value may be a secret."""
+    return [t.split("=", 1)[0] for t in tokens if t.startswith("-")]
+
+
+def mask_flag_values(tokens: list[str]) -> list[str]:
+    """`tokens` with every option value replaced by an ellipsis (names stay), for the sleeper.log copy of a
+    manual resume line."""
+    return [t.split("=", 1)[0] + "=…" if t.startswith("-") and "=" in t else t if t.startswith("-") else "…"
+            for t in tokens]
+
+
+LOG_MASKS: dict[str, str] = {}   # full manual line -> the same with option values masked (see say)
+
+
 def manual_command(entry: dict) -> str:
-    """The by-hand resume line printed when we refuse to act automatically."""
+    """The by-hand resume line printed when we refuse to act automatically. The operator sees it whole; `say`
+    writes the masked form to sleeper.log (an option value may be a secret)."""
     kind = entry.get("kind") or "claude"
     extra: list[str] = []
     if kind in KINDS and (PROFILES.get(kind, {}).get("argv_after_binary") or entry.get("restore_repair")
@@ -431,17 +483,42 @@ def manual_command(entry: dict) -> str:
     argv = resume_argv(kind, entry["uuid"], extra or None)
     if argv is None:
         return f"(no resume recipe for {kind}; session {entry['uuid']})"
-    return f"cd {shlex.quote(entry.get('cwd') or '.')} && " + shlex.join([kind_binary(kind), *argv])
+    head = f"cd {shlex.quote(entry.get('cwd') or '.')} && "
+    full = head + shlex.join([kind_binary(kind), *argv])
+    if extra:
+        if len(LOG_MASKS) > 200:
+            LOG_MASKS.clear()
+        masked = resume_argv(kind, entry["uuid"], mask_flag_values(extra)) or []
+        LOG_MASKS[full] = head + shlex.join([kind_binary(kind), *masked])
+    return full
 
 
 # -------------------------------------------------------------------- output
 
+def ensure_state_dir() -> None:
+    """The state dir exists and is private (0700): the logs and journals in it hold argv, cwd and flags."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with contextlib.suppress(OSError):
+        os.chmod(STATE_DIR, 0o700)  # one created by an older version under the umask
+
+
+def open_private_append(path: Path):  # type: ignore[no-untyped-def]
+    """Open `path` for appending, created 0600 (and tightened when it already exists)."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with contextlib.suppress(OSError):
+        os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "a")
+
+
 def say(msg: str) -> None:
     """Diagnostics: to the log always, to the caller's stdout too."""
-    line = f"{dt.datetime.now().isoformat(timespec='seconds')} {msg}"
+    logged = msg
+    for full, masked in LOG_MASKS.items():
+        logged = logged.replace(full, masked)
+    line = f"{dt.datetime.now().isoformat(timespec='seconds')} {logged}"
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        with LOGFILE.open("a") as fh:
+        ensure_state_dir()
+        with open_private_append(LOGFILE) as fh:
             fh.write(line + "\n")
     except OSError:
         pass
@@ -456,9 +533,9 @@ def stamp(ts: float | None = None) -> str:
 def event(what: str, **fields: object) -> None:
     """Append one structured record to events.jsonl (what `log` shows)."""
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        ensure_state_dir()
         rec = {"at": dt.datetime.now().isoformat(timespec="seconds"), "event": what, **fields}
-        with EVENTS.open("a") as fh:
+        with open_private_append(EVENTS) as fh:
             fh.write(json.dumps(rec, sort_keys=True) + "\n")
     except OSError as exc:
         say(f"WARN could not write event: {exc}")
@@ -473,7 +550,7 @@ def notify(title: str, body: str = "", enabled: bool = True) -> None:
 # ---------------------------------------------------------------- json state
 
 def write_json(path: Path, data: object) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_state_dir()
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     with os.fdopen(fd, "w") as fh:
         fh.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
@@ -515,7 +592,7 @@ class locked:
         self.timeout = timeout
 
     def __enter__(self) -> "locked":
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        ensure_state_dir()
         self.fh = LOCK.open("a+")
         try:
             fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -598,7 +675,7 @@ def list_agents() -> list[dict]:
 def valid_entry(entry: object) -> bool:
     """A journal/snapshot entry we are willing to act on."""
     return (isinstance(entry, dict) and isinstance(entry.get("pane_id"), str)
-            and isinstance(entry.get("uuid"), str) and isinstance(entry.get("kind"), str))
+            and valid_session_id(entry.get("uuid")) and isinstance(entry.get("kind"), str))
 
 
 # -------------------------------------------------------------------- config
@@ -718,7 +795,8 @@ def load_config() -> tuple[dict, dict[str, str]]:
            "agents": "HERDR_SLEEPER_AGENTS", "poll_seconds": "HERDR_SLEEPER_POLL_SECONDS",
            "notify": "HERDR_SLEEPER_NOTIFY", "wake_on_focus": "HERDR_SLEEPER_WAKE_ON_FOCUS",
            "repair_flags": "HERDR_SLEEPER_REPAIR_FLAGS", "repair_window_minutes": "HERDR_SLEEPER_REPAIR_WINDOW_MINUTES",
-           "repair_kinds": "HERDR_SLEEPER_REPAIR_KINDS", "require_empty_composer": "HERDR_SLEEPER_REQUIRE_EMPTY_COMPOSER"}
+           "repair_kinds": "HERDR_SLEEPER_REPAIR_KINDS", "repair_bypass": "HERDR_SLEEPER_REPAIR_BYPASS",
+           "require_empty_composer": "HERDR_SLEEPER_REQUIRE_EMPTY_COMPOSER"}
     if "HERDR_SLEEPER_IDLE" in os.environ and "HERDR_SLEEPER_IDLE_HOURS" in os.environ:
         raise ConfigError("set only one of HERDR_SLEEPER_IDLE and HERDR_SLEEPER_IDLE_HOURS")
     for k, var in env.items():
@@ -728,7 +806,7 @@ def load_config() -> tuple[dict, dict[str, str]]:
             values[key] = (raw_v.split() if k in ("exclude", "agents", "repair_kinds")
                            else parse_duration(raw_v) if key == "idle_hours"
                            else _env_bool(var, raw_v) if key in ("notify", "wake_on_focus", "repair_flags",
-                                                                  "require_empty_composer")
+                                                                  "repair_bypass", "require_empty_composer")
                            else raw_v)
             source[key] = f"${var}"
     if source["exclude"] == "default":
@@ -772,7 +850,7 @@ def load_config() -> tuple[dict, dict[str, str]]:
     unknown = [a for a in values["repair_kinds"] if a not in KINDS]
     if unknown:
         raise ConfigError(f"repair_kinds has kind(s) Herdr does not restore {unknown}; known: {sorted(KINDS)}")
-    for key in ("notify", "wake_on_focus", "repair_flags", "require_empty_composer"):
+    for key in ("notify", "wake_on_focus", "repair_flags", "repair_bypass", "require_empty_composer"):
         if not isinstance(values[key], bool):
             raise ConfigError(f"{key} must be a boolean")
     window = values["repair_window_minutes"]
@@ -930,7 +1008,7 @@ def replayable_argv(args: list[str], kind: str = "claude") -> tuple[list[str] | 
         if a == "--":
             return None, "argv contains `--` (positional input would be replayed)"
         if a in REFUSED_OPTIONS or a.split("=", 1)[0] in REFUSED_OPTIONS:
-            return None, f"argv contains {a} (not safely replayable)"
+            return None, f"argv contains {_option_name(a)} (not safely replayable)"
         if a in ("--resume", "-r"):
             if i + 1 < len(args) and not args[i + 1].startswith("-"):
                 i += 1  # drop its value too
@@ -948,15 +1026,15 @@ def replayable_argv(args: list[str], kind: str = "claude") -> tuple[list[str] | 
             out.append(a)
             if "=" not in a:
                 if i + 1 >= len(args):
-                    return None, f"{a} is missing its value"
+                    return None, f"{_option_name(a)} is missing its value"
                 out.append(args[i + 1])
                 i += 1
             i += 1
             continue
         if a.startswith("-"):
             # an option we do not know the arity of: guessing could turn a prompt into a "value" and replay it
-            return None, f"argv has unrecognised option {a} (add it to VALUE_OPTIONS/BOOLEAN_OPTIONS if it is safe)"
-        return None, f"argv has positional input {a!r} (an initial prompt would be re-sent on wake)"
+            return None, f"argv has unrecognised option {_option_name(a)} (add it to VALUE_OPTIONS/BOOLEAN_OPTIONS if it is safe)"
+        return None, f"argv has positional input ({len(a)} chars; an initial prompt would be re-sent on wake)"
     return out, None
 
 
@@ -969,7 +1047,7 @@ def replayable_kind(kind: str, args: list[str]) -> tuple[list[str] | None, str |
 
     Fail closed, per KINDS[kind]: the kind's own resume forms are dropped (the resume tokens replace them);
     `--`, a positional argument (an initial prompt, a subcommand such as `exec` or `fork`), an option from the
-    kind's refused set, a missing value and, in "deny" mode, an unlisted short option are refused; in "none"
+    kind's refused set, a missing value and any option not in the kind's lists are refused; in "none"
     mode (the CLI was not readable on the machine this table was written on) so is anything but the resume
     tokens. A kind with no entry yields "not replayable", never a guess.
     """
@@ -988,10 +1066,10 @@ def replayable_kind(kind: str, args: list[str]) -> tuple[list[str] | None, str |
                 seen_positional = True
                 i += 2 if i + 1 < len(args) and not args[i + 1].startswith("-") else 1  # the subcommand and its id
                 continue
-            return None, f"argv has positional input {a!r} (an initial prompt or subcommand would be re-run on wake)"
+            return None, f"argv has positional input ({len(a)} chars; an initial prompt or subcommand would be re-run on wake)"
         name = _option_name(a)
         if name in spec["refused"]:
-            return None, f"argv contains {a} (not safely replayable)"
+            return None, f"argv contains {_option_name(a)} (not safely replayable)"
         has_value = "=" in a
         if name in spec["strip_value"] | spec["strip_optional"] | spec["strip_named"]:
             nxt = args[i + 1] if i + 1 < len(args) else None
@@ -1003,21 +1081,23 @@ def replayable_kind(kind: str, args: list[str]) -> tuple[list[str] | None, str |
             i += 1
             continue
         if spec["mode"] == "none":
-            return None, f"argv has option {a} and the {kind} CLI was not available to read its options (not replayable)"
+            return None, f"argv has option {_option_name(a)} and the {kind} CLI was not available to read its options (not replayable)"
         if name in spec["values"]:
             out.append(a)
             if not has_value:
                 if i + 1 >= len(args):
-                    return None, f"{a} is missing its value"
+                    return None, f"{_option_name(a)} is missing its value"
                 out.append(args[i + 1])
                 i += 1
             i += 1
             continue
-        if name in spec["bools"] or (spec["mode"] == "deny" and a.startswith("--")):
-            out.append(a)  # an unlisted long option is taken as a boolean: a value after it is refused above
+        if name in spec["bools"]:
+            out.append(a)
             i += 1
             continue
-        return None, f"argv has unrecognised option {a} (add it to KINDS[{kind!r}] if it is safe)"
+        # not listed: refuse, long or short, with or without `=value`. An unlisted `--token=...` would otherwise be
+        # replayed (and its value could be a secret); a pane we cannot vouch for is left alone.
+        return None, f"argv has unrecognised option {_option_name(a)} (add it to KINDS[{kind!r}] if it is safe)"
     return out, None
 
 
@@ -1297,6 +1377,25 @@ def terminal_born(terminal: str | None) -> float | None:
     return born if 1.5e9 < born < 4.1e9 else None
 
 
+def process_started(pid: int) -> float | None:
+    """Unix time process `pid` started (ps etime, one-second resolution), None when ps cannot say."""
+    try:
+        out = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    age = parse_etime(out)
+    return None if age is None else time.time() - age
+
+
+def agent_identity(pid: object) -> dict:
+    """{pid, pid_started} for a restore marker; {} when the pid or its start time cannot be read (the repair
+    then fails closed: it cannot tell the restore's agent from a later one)."""
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return {}
+    started = process_started(pid)
+    return {} if started is None else {"pid": pid, "pid_started": started}
+
+
 def parse_etime(text: str) -> float | None:
     """ps `etime` ([[dd-]hh:]mm:ss) in seconds."""
     m = re.fullmatch(r"\s*(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)\s*", text)
@@ -1430,7 +1529,7 @@ def merge_snapshot(agents: list[dict], repair: bool | set[str] | frozenset[str] 
         if isinstance(prior, dict) and prior.get("uuid") and prior.get("uuid") != uuid:
             retire(a["pane_id"])
             prior = {}
-        present, argv, _pid = agent_process(a["pane_id"], kind)
+        present, argv, pid = agent_process(a["pane_id"], kind)
         hiccup = argv is None and present is None and prior.get("uuid") == uuid
         if hiccup:
             argv = prior.get("argv")  # process-info hiccup: keep what we knew rather than erase it
@@ -1454,7 +1553,7 @@ def merge_snapshot(agents: list[dict], repair: bool | set[str] | frozenset[str] 
             row["name"] = row["name"] or src.get("name")
             row["repair"] = marker or {"terminal_id": a.get("terminal_id"), "state": REPAIR_PENDING,
                                        "first_seen": stamp(), "first_seen_ts": time.time(),
-                                       "from_terminal": src.get("terminal_id")}
+                                       "from_terminal": src.get("terminal_id"), **agent_identity(pid)}
             if lost is not None:
                 row["repair"] = {**row["repair"], "evidence": RESTORE_EVIDENCE}  # proven again on this very look
         elif marker is not None and not pending:
@@ -1501,6 +1600,8 @@ def assess(agent: dict, all_agents: list[dict], idle_hours: float, journal: dict
     uuid = (agent.get("agent_session") or {}).get("value")
     if not uuid:
         return False, "no session uuid (cannot resume)", None
+    if not valid_session_id(uuid):
+        return False, "session id has characters outside the plain-token set (refused)", None
     if not allow_focused and agent.get("focused") is not False:  # missing/None must not read as "not focused"
         return False, "pane is focused (or focus unknown)", None
     status = agent.get("agent_status")
@@ -1728,6 +1829,8 @@ def stub_command(pane: str, uuid: str, slept_at: str) -> str:
     out: the CLI routes by HERDR_SOCKET_PATH (src/session.rs), and an inherited client
     socket could belong to an outer session.
     """
+    if not valid_session_id(uuid):
+        raise SleeperError("refusing to type a stub line for a session id that is not a plain token")
     env_args = [f"{var}={os.environ[var]}" for var in ("HERDR_SOCKET_PATH", "HERDR_BIN_PATH") if os.environ.get(var)]
     env_args.append(f"HERDR_SESSION={SESSION}")
     banner = SLEEP_MARK + "slept by herdr-sleeper " + slept_at
@@ -2085,7 +2188,7 @@ def wake_entry(entry: dict, via: str = "command", key: str | None = None) -> boo
     write_json(JOURNAL, journal)
     say(f"woke {name} in {pane} uuid={got} (via {via})")
     if via == "repair":  # restore repair: one event per repair, whose second half this wake is
-        event("repaired", pane=pane, name=name, uuid=got, kind=kind, flags=extra, terminal=entry.get("terminal_id"),
+        event("repaired", pane=pane, name=name, uuid=got, kind=kind, flags=flag_names(extra), terminal=entry.get("terminal_id"),
               from_terminal=entry.get("repair_from_terminal"))
     else:
         event("woke", pane=pane, name=name, uuid=got, kind=kind, via=via, slept_at=entry.get("slept_at"))
@@ -2348,6 +2451,7 @@ def reconcile(agents: list[dict]) -> None:
 # being wrong, and the only way to get the flags back.
 
 REPAIR_PENDING = "pending"
+REPAIR_IDLE_DWELL_SECONDS = 60     # a restored agent must sit idle/done this long (one state_change_seq) before repair acts
 
 # Kinds that restore repair covers only when `repair_kinds` names them. codex: its TUI does not restore the
 # terminal's keyboard protocol after a signal (the reason it never joined PROFILES), repair types no reset
@@ -2415,6 +2519,8 @@ def repair_gate(now: dict | None, scan: dict, agents: list[dict], row: dict, rec
         # the marker was made without richer_record's proof that this terminal is a Herdr restore of the pane
         # (an older version's, or edited by hand): merge_snapshot proves it again on its next look
         return "no proof that Herdr's restore relaunched this pane (waiting for the next look)", None
+    if config and (pane in (config.get("exclude") or ()) or now.get("name") in (config.get("exclude") or ())):
+        return "excluded", None
     if now.get("focused") is not False:  # missing/None must not read as "not focused"
         return "pane is focused (or focus unknown)", None
     if now.get("agent_status") not in SLEEPABLE_STATUSES:
@@ -2431,6 +2537,8 @@ def repair_gate(now: dict | None, scan: dict, agents: list[dict], row: dict, rec
     present, live_argv, pid = agent_process(pane, kind)
     if present is not True or not isinstance(pid, int) or isinstance(pid, bool):
         return "agent process not identifiable for signal", None
+    if pid != (repair_marker(row) or {}).get("pid"):
+        return "the agent process is not the one recorded when the restore was noticed", None
     live_extras, _why = replayable_argv(live_argv or [], kind)
     if (live_extras is None or not selects(kind, live_argv or [], uuid) or len(live_extras) >= len(rec_extras)
             or not is_subsequence(live_extras, rec_extras)):
@@ -2443,6 +2551,68 @@ def repair_gate(now: dict | None, scan: dict, agents: list[dict], row: dict, rec
     if where:
         return f"session live in {where}", None
     return None, pid
+
+
+def repair_dwell(agent: dict, marker: dict, uuid: str, terminal: str | None) -> tuple[str | None, bool]:
+    """(reason to keep waiting or None once repair may act, whether the marker was settled for good).
+    Writes the marker; caller holds the lock.
+
+    Herdr's restore launch and an operator's own bare `claude --resume` look identical, and the status turns idle
+    moments after either. Two guards:
+    * the agent's pid and start time were recorded when the marker was made (merge_snapshot, the restore's own
+      launch); if the pane's agent now has another pid or start time, the pane was relaunched since (by the
+      operator; or the agent re-exec'd): the marker is settled `relaunched` and nothing is repaired. A marker
+      with no recorded identity, or a pid that cannot be read now, is not repaired (fail closed).
+    * the agent must stay idle or done, through one unchanged `state_change_seq`, for REPAIR_IDLE_DWELL_SECONDS.
+    Not caught: an operator relaunch before the marker was made, which no signal tells apart."""
+    pane, kind = agent["pane_id"], agent.get("agent")
+    pid0, started0 = marker.get("pid"), marker.get("pid_started")
+    if not isinstance(pid0, int) or isinstance(pid0, bool) or not isinstance(started0, (int, float)):
+        return "agent pid was not recorded when the restore was noticed (not repaired)", False
+    present, _argv, pid = agent_process(pane, kind)
+    if present is not True or not isinstance(pid, int) or isinstance(pid, bool):
+        return "agent process not identifiable for signal", False
+    started = process_started(pid)
+    if started is None:
+        return "agent start time not readable (not repaired)", False
+    if pid != pid0 or abs(started - started0) > 5:
+        set_repair_state(pane, uuid, terminal, "relaunched", reason="the agent process changed after the restore")
+        event("repair-settled", pane=pane, name=agent.get("name"), uuid=uuid, kind=kind,
+              reason="the agent process is not the one the restore started (relaunched since)")
+        return "the agent process is not the restore's (relaunched since): left alone", True
+    seq, now = agent.get("state_change_seq"), time.time()
+    since = marker.get("dwell_since_ts")
+    if marker.get("dwell_seq") != seq or not isinstance(since, (int, float)) or isinstance(since, bool):
+        set_repair_state(pane, uuid, terminal, REPAIR_PENDING, dwell_seq=seq, dwell_since_ts=now)
+        since = now
+    if now - since < REPAIR_IDLE_DWELL_SECONDS:
+        return f"waiting for {REPAIR_IDLE_DWELL_SECONDS}s of idle", False
+    return None, False
+
+
+def skipped_names(row: dict, kind: str) -> list[str]:
+    """Names of the bypass-class options in the row's recorded argv (for the log line only)."""
+    flags, _why = replayable_argv(row.get("argv") or [], kind)
+    return without_bypass(kind, flags or [])[1]
+
+
+def without_bypass(kind: str, extras: list[str]) -> tuple[list[str], list[str]]:
+    """(extras without the options KINDS marks `bypass` and their values, the names dropped)."""
+    bypass = KINDS[kind]["bypass"]
+    takes_value = VALUE_OPTIONS if kind == "claude" else KINDS[kind]["values"]
+    out: list[str] = []
+    dropped: list[str] = []
+    i = 0
+    while i < len(extras):
+        tok = extras[i]
+        name = _option_name(tok)
+        if tok.startswith("-") and name in bypass:
+            dropped.append(name)
+            i += 2 if "=" not in tok and name in takes_value else 1
+            continue
+        out.append(tok)
+        i += 1
+    return out, dropped
 
 
 def repair_agent(agent: dict, agents: list[dict], row: dict, config: dict) -> tuple[bool, str]:
@@ -2462,6 +2632,11 @@ def repair_agent(agent: dict, agents: list[dict], row: dict, config: dict) -> tu
     kind = row.get("kind") or "claude"
     marker = repair_marker(row) or {}
     rec_extras, why = replayable_argv(row.get("argv") or [], kind)
+    if rec_extras and not config.get("repair_bypass"):
+        rec_extras, skipped = without_bypass(kind, rec_extras)
+        if not rec_extras and skipped:
+            return False, (f"only permission/sandbox-bypass flags ({' '.join(skipped)}) were recorded; "
+                           "`[restore] repair_bypass = true` re-adds them")
     if not rec_extras:
         return False, f"recorded argv not replayable: {why or 'it carries no flags'}"
     reason, _pid = repair_gate(agent, agent, agents, row, rec_extras, read_json(JOURNAL), config)
@@ -2511,7 +2686,9 @@ def repair_agent(agent: dict, agents: list[dict], row: dict, config: dict) -> tu
         withdraw()
         set_repair_state(pane, uuid, terminal, REPAIR_PENDING, reason=f"signal failed: {exc}")
         return False, f"signal failed: {exc}"
-    say(f"repair {label}: relaunching {kind} with {shlex.join(rec_extras)} (Herdr's restore dropped them)")
+    say(f"repair {label}: relaunching {kind} with {shlex.join(flag_names(rec_extras))} (Herdr's restore dropped them)"
+        + ("" if config.get("repair_bypass") or not skipped_names(row, kind) else
+           f"; left out (repair_bypass is off): {shlex.join(skipped_names(row, kind))}"))
 
     # 4. positive evidence that it is gone, then the wake half
     if not wait_agent_gone(pane, kind):
@@ -2532,7 +2709,7 @@ def repair_agent(agent: dict, agents: list[dict], row: dict, config: dict) -> tu
         outcome = False
     if outcome is True:
         set_repair_state(pane, uuid, terminal, "repaired")
-        notify(f"🔧 restored flags for {name or pane}", "relaunched with " + shlex.join(rec_extras),
+        notify(f"🔧 restored flags for {name or pane}", "relaunched with " + shlex.join(flag_names(rec_extras)),
                enabled=config["notify"])
         return True, "repaired"
     event("repair-failed", pane=pane, name=name, uuid=uuid, kind=kind,
@@ -2563,6 +2740,9 @@ def repair_restored(agents: list[dict], config: dict) -> set[str]:
         row = snap.get(pane)
         marker = repair_marker(row)
         uuid = (agent.get("agent_session") or {}).get("value")
+        excluded = config.get("exclude") or ()
+        if pane in excluded or agent.get("name") in excluded:
+            continue  # the operator's exclude list keeps a pane out of repair exactly as it keeps it out of sleep
         if (marker is None or marker.get("state") != REPAIR_PENDING or kind not in kinds
                 or row.get("kind") != kind or row.get("uuid") != uuid or marker.get("terminal_id") != agent.get("terminal_id")):
             continue
@@ -2579,7 +2759,15 @@ def repair_restored(agents: list[dict], config: dict) -> set[str]:
             LAST_SKIP.pop("repair:" + pane, None)
             continue
         try:
-            attempted, detail = repair_agent(agent, agents, row, config)
+            wait, settled = ((None, False) if agent.get("agent_status") not in SLEEPABLE_STATUSES
+                             else repair_dwell(agent, marker, uuid, agent.get("terminal_id")))
+            if settled:
+                LAST_SKIP.pop("repair:" + pane, None)
+                continue  # the marker is settled `relaunched`: nothing more to write or try
+            if wait:
+                attempted, detail = False, wait
+            else:
+                attempted, detail = repair_agent(agent, agents, row, config)
         except SleeperError as exc:  # liveness unverifiable, a Herdr call failed: wait, never go
             attempted, detail = False, f"error: {exc}"
         except Exception as exc:  # noqa: BLE001 - a bug that only this pane's data triggers costs this pane
@@ -2738,7 +2926,7 @@ def take_watcher_lock() -> object | None:
                 return os.fdopen(fd, "a+")
         except OSError:
             pass
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_state_dir()
     lock_fh = WATCHER_LOCK.open("a+")
     for waited in range(WATCHER_LOCK_WAIT_SECONDS + 1):  # an old watcher may be finishing a transaction
         try:
@@ -2906,7 +3094,7 @@ def watcher_alive(rec: dict | None) -> bool:
 def watcher_lock_held() -> bool:
     """Is a watcher holding watcher.lock? (No ps, no pid file: cheap enough for every focus hook.)"""
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        ensure_state_dir()
         fh = WATCHER_LOCK.open("a+")
     except OSError:
         return False
@@ -2947,7 +3135,7 @@ def ensure_watcher(replace_changed: bool = True, heal: bool = False, sweep: bool
                 os.kill(cur["pid"], 0)
             except OSError:
                 break
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_state_dir()
     env = {k: v for k, v in os.environ.items() if not (heal and k.startswith("HERDR_SLEEPER_"))}
     env["HERDR_BIN_PATH"] = HERDR_BIN
     child = subprocess.Popen([sys.executable, str(SELF), "watch"], start_new_session=True,
@@ -3130,7 +3318,7 @@ def pause(seconds: float) -> None:
 
 
 def watch_loop() -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_state_dir()
     lock_fh = take_watcher_lock()
     if lock_fh is None:
         print(f"another watcher holds {WATCHER_LOCK}; exiting")
@@ -3141,7 +3329,7 @@ def watch_loop() -> None:
             started = code_stamp()
         except OSError:
             started = "gone"  # deleted between the import and now: the reload check logs it once
-        WATCHER_PID.write_text(json.dumps({"pid": os.getpid(), "stamp": started, "lock": True}))
+        write_json(WATCHER_PID, {"pid": os.getpid(), "stamp": started, "lock": True})  # 0600, atomic
         say(f"watcher start session={SESSION}")
         clocks = load_clocks()
         failures = 0
@@ -3202,7 +3390,7 @@ def wake_lock(pane: str):
     Returns a release callable, or None when a recent holder is on this pane.
     """
     path = STATE_DIR / f".{pane.replace(':', '_')}.wakelock"
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_state_dir()
     for _ in range(2):
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)

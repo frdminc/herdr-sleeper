@@ -108,6 +108,7 @@ def transcript(tmp_path: Path, uuid: str, age_hours: float, proj: str = "proj") 
     return p
 
 
+PROC_START = 4_000_000.0   # the start time the fake reports for every agent process
 EMPTY_SCREEN = "⏺ pong\n────────\n❯ \n────────\n  ◤ graft · 40 nodes\n"
 
 
@@ -279,6 +280,8 @@ def fake(state: Path, monkeypatch: pytest.MonkeyPatch) -> FakeHerdr:
     monkeypatch.setattr(sleeper.time, "sleep", lambda s: None)
     monkeypatch.setattr(sleeper, "EXIT_WAIT_SECONDS", 2)
     monkeypatch.setattr(sleeper.os, "kill", f.kill)
+    monkeypatch.setattr(sleeper, "process_started", lambda pid: PROC_START)   # ps is not asked
+    monkeypatch.setattr(sleeper, "REPAIR_IDLE_DWELL_SECONDS", 0)               # the dwell has its own tests
     transcript(state, UUID, 30)
     return f
 
@@ -389,7 +392,7 @@ def test_load_config_precedence(state: Path, monkeypatch: pytest.MonkeyPatch) ->
     values, source = sleeper.load_config()
     assert values == {"idle_hours": 12.0, "agents": ["claude", "opencode"], "exclude": [],
                       "poll_seconds": 60, "notify": True, "wake_on_focus": False,
-                      "repair_flags": True, "repair_window_minutes": 30.0,
+                      "repair_flags": True, "repair_bypass": False, "repair_window_minutes": 30.0,
                       "repair_kinds": [k for k in sleeper.KINDS if k != "codex"], "require_empty_composer": True}
     assert set(source.values()) == {"default"}
 
@@ -2171,7 +2174,8 @@ def restore(fake: FakeHerdr, terminal: str = NEW_TERM, argv: list[str] | None = 
 
 
 def repair_config(**over: Any) -> dict[str, Any]:
-    return {**sleeper.DEFAULTS, **sleeper.RESTORE_DEFAULTS, "notify": False, "repair_kinds": list(sleeper.KINDS), **over}
+    return {**sleeper.DEFAULTS, **sleeper.RESTORE_DEFAULTS, "notify": False, "repair_kinds": list(sleeper.KINDS),
+            "repair_bypass": True, **over}   # bypass flags on here: most tests restore FLAGS whole
 
 
 def snap_row(pane: str = "w1:p1") -> dict[str, Any]:
@@ -2382,7 +2386,7 @@ def test_restore_repair_relaunches_a_bare_restored_pane_with_its_flags(fake: Fak
     assert events() == ["repaired"]                                          # one event line per repair
     assert not any(c[:2] == ("pane", "send-keys") for c in fake.calls)       # a repair never types into a pane
     last = json.loads(sleeper.EVENTS.read_text().splitlines()[-1])
-    assert last["flags"] == FLAGS and last["from_terminal"] == OLD_TERM and last["terminal"] == NEW_TERM
+    assert last["flags"] == ["--dangerously-skip-permissions", "--model"] and last["from_terminal"] == OLD_TERM and last["terminal"] == NEW_TERM
     assert snap_row()["repair"]["state"] == "repaired"
 
 
@@ -2562,12 +2566,14 @@ def test_restore_repair_kinds_narrow_it(fake: FakeHerdr) -> None:
     assert len(fake.signals) == 1 and events() == ["repaired"]
 
 
-def test_restore_repair_ignores_the_sleep_exclude_list(fake: FakeHerdr) -> None:
-    """`exclude` keeps orchestrators from being slept; they run with the same launch flags and need them back."""
+@pytest.mark.parametrize("exclude", [["a"], ["w1:p1"]])
+def test_restore_repair_honours_the_exclude_list_like_sleep_does(fake: FakeHerdr, exclude: list[str]) -> None:
+    """v0.1.2 review M1: an excluded pane (by name or pane id) is never signalled, restored or not."""
     record()
     restore(fake)
-    tick(repair_config(exclude=["a"]))
-    assert len(fake.signals) == 1 and events() == ["repaired"]
+    tick(repair_config(exclude=exclude))
+    tick(repair_config(exclude=exclude))
+    assert fake.signals == [] and starts(fake) == [] and events() == []
 
 
 def test_restore_repair_covers_opencode_with_its_own_flags(fake: FakeHerdr) -> None:
@@ -2825,8 +2831,6 @@ def test_the_binary_is_not_always_the_kind() -> None:
     ("pi", ["--session", "/s/x.jsonl"], []),                                  # the resume tokens and nothing else
     ("letta", ["--conversation", "default", "--agent", "a1"], []),
     ("claude", [], []), ("codex", [], []), ("cursor", [], []),
-    # an unlisted long option is a boolean; an unlisted short one is refused (see the refusal table)
-    ("codex", ["--brand-new-flag"], ["--brand-new-flag"]),
 ])
 def test_replayable_argv_per_kind(kind: str, argv: list[str], expected: list[str]) -> None:
     assert sleeper.replayable_argv(argv, kind) == (expected, None)
@@ -2840,6 +2844,9 @@ def test_replayable_argv_per_kind(kind: str, argv: list[str], expected: list[str
     ("codex", ["-i", "a.png"], "-i"), ("codex", ["--image", "a.png"], "--image"),
     ("codex", ["--worktree"], "--worktree"), ("codex", ["-m"], "missing its value"),
     ("codex", ["-Z"], "unrecognised"),
+    ("codex", ["--brand-new-flag"], "unrecognised"),                        # v0.1.2: an unlisted long option is refused too
+    ("hermes", ["--token=sk-secret"], "unrecognised"), ("opencode", ["--api-key=sk-secret"], "unrecognised"),
+    ("agy", ["--token", "sk-secret"], "unrecognised"), ("copilot", ["--secret=sk-secret"], "unrecognised"),
     ("copilot", ["-p", "do it"], "-p"), ("copilot", ["--prompt=do it"], "--prompt"),
     ("copilot", ["-i", "x"], "-i"), ("copilot", ["-s"], "-s"), ("copilot", ["--session-id", UUID], "--session-id"),
     ("copilot", ["--connect"], "--connect"), ("copilot", ["--attachment", "f"], "--attachment"),
@@ -3004,7 +3011,7 @@ def test_restore_repair_relaunches_every_kind_with_its_flags(
     assert journal() == {} and fake.agents[0]["label"] == "mylabel"
     assert events() == ["repaired"]
     last = json.loads(sleeper.EVENTS.read_text().splitlines()[-1])
-    assert last["kind"] == kind and last["flags"] == flags and last["from_terminal"] == OLD_TERM
+    assert last["kind"] == kind and last["flags"] == [t.split("=")[0] for t in flags if t.startswith("-")] and last["from_terminal"] == OLD_TERM
     assert snap_row()["repair"]["state"] == "repaired"
 
 
@@ -3297,15 +3304,16 @@ def test_a_deploy_that_compiles_but_cannot_start_is_not_reloaded(state: Path, mo
 
 def test_the_smoke_run_is_judged_once_per_stamp_and_a_hang_is_a_failure(
         state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    script = deployed(state, monkeypatch)
+    script = deployed(state, monkeypatch, smoke=True)
     calls: list[int] = []
-    monkeypatch.setattr(sleeper, "smoke_problem", lambda script=None: calls.append(1) or "`version` did not finish")
-    check = sleeper.ReloadCheck(sleeper.code_stamp())
-    script.write_text(version_text(2))
-    for _ in range(5):
-        verdict, detail = check.look()
-    assert verdict == "unrunnable" and "did not finish" in detail and calls == [1]
-    monkeypatch.undo()                                              # the real smoke_problem, with a run that times out
+    with monkeypatch.context() as local:     # only this patch is undone: the state fixture's isolation stays (review L4)
+        local.setattr(sleeper, "smoke_problem", lambda script=None: calls.append(1) or "`version` did not finish")
+        check = sleeper.ReloadCheck(sleeper.code_stamp())
+        script.write_text(version_text(2))
+        for _ in range(5):
+            verdict, detail = check.look()
+        assert verdict == "unrunnable" and "did not finish" in detail and calls == [1]
+    # the real smoke_problem, with a run that times out
     monkeypatch.setattr(sleeper.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
         sleeper.subprocess.TimeoutExpired("x", 1)))
     assert "did not finish within" in sleeper.smoke_problem(script)
@@ -4117,3 +4125,219 @@ def test_the_marker_thread_stops_when_told_and_does_not_start_when_already_told(
     assert len(calls) == seen
     stop.clear()
     sleeper.keep_marking_stub_row("w1:p1", UUID, stop, seconds=0.05).join(5)         # gives up after its time
+
+
+# ============================================ v0.1.2 review round 2 (restore repair guards, secrets, uuids)
+
+def clocked(monkeypatch: pytest.MonkeyPatch, start: float = 1_000_000.0) -> dict[str, float]:
+    clock = {"t": start}
+    monkeypatch.setattr(sleeper.time, "time", lambda: clock["t"])
+    return clock
+
+
+def test_repair_waits_out_the_idle_dwell_and_restarts_it_when_the_state_moves(
+        fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sleeper, "REPAIR_IDLE_DWELL_SECONDS", 60)
+    clock = clocked(monkeypatch)
+    record()
+    restore(fake)
+    tick()                                                       # the first idle tick never repairs
+    assert fake.signals == [] and "idle" in snap_row()["repair"]["reason"]
+    clock["t"] += 50
+    fake.agents[0]["state_change_seq"] += 1                      # the agent did something: the dwell starts over
+    tick()
+    clock["t"] += 30
+    tick()
+    assert fake.signals == []
+    clock["t"] += 31
+    tick()
+    assert len(fake.signals) == 1 and events() == ["repaired"]
+
+
+def test_repair_leaves_a_pane_alone_when_the_agent_process_changed_after_the_restore(
+        fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator exits the restored agent and runs a bare `claude --resume` themselves: another pid."""
+    monkeypatch.setattr(sleeper, "REPAIR_IDLE_DWELL_SECONDS", 60)
+    clock = clocked(monkeypatch)
+    record()
+    restore(fake)
+    tick()
+    assert snap_row()["repair"]["pid"] == 1
+    fake.agents[0]["pid_hint"] = 2
+    clock["t"] += 120
+    tick()
+    tick()
+    assert fake.signals == [] and starts(fake) == []
+    assert snap_row()["repair"]["state"] == "relaunched" and events() == ["repair-settled"]
+
+
+def test_repair_treats_a_reused_pid_with_another_start_time_as_a_relaunch(
+        fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sleeper, "REPAIR_IDLE_DWELL_SECONDS", 60)
+    clock = clocked(monkeypatch)
+    record()
+    restore(fake)
+    tick()
+    monkeypatch.setattr(sleeper, "process_started", lambda pid: PROC_START + 3600)
+    clock["t"] += 120
+    tick()
+    assert fake.signals == [] and snap_row()["repair"]["state"] == "relaunched"
+
+
+def test_repair_fails_closed_when_the_pid_was_never_readable(fake: FakeHerdr) -> None:
+    record()
+    restore(fake)
+    fake.pidless = True
+    tick()
+    tick()
+    assert fake.signals == [] and starts(fake) == []
+    assert "pid" in snap_row()["repair"]["reason"] and "pid" not in snap_row()["repair"]
+
+
+def test_repair_fails_closed_when_the_pid_is_unreadable_at_the_time_of_the_repair(
+        fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sleeper, "REPAIR_IDLE_DWELL_SECONDS", 60)
+    clock = clocked(monkeypatch)
+    record()
+    restore(fake)
+    tick()
+    fake.pidless = True
+    clock["t"] += 120
+    tick()
+    assert fake.signals == [] and snap_row()["repair"]["state"] == "pending"
+    fake.pidless = False
+    tick()
+    assert len(fake.signals) == 1
+
+
+def test_repair_fails_closed_when_the_start_time_is_unreadable(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sleeper, "process_started", lambda pid: None)
+    record()
+    restore(fake)
+    tick()
+    assert fake.signals == [] and "pid" not in snap_row()["repair"]
+
+
+def test_repair_leaves_bypass_flags_out_unless_the_operator_opted_in(fake: FakeHerdr) -> None:
+    record()                                                     # --dangerously-skip-permissions --model haiku
+    restore(fake)
+    tick(repair_config(repair_bypass=False))
+    assert len(starts(fake)) == 1
+    start = starts(fake)[0]
+    assert start[start.index("--") + 1:] == ("--model", "haiku", "--resume", UUID)    # the rest comes back
+    last = json.loads(sleeper.EVENTS.read_text().splitlines()[-1])
+    assert last["flags"] == ["--model"]
+
+
+def test_repair_re_adds_bypass_flags_with_the_opt_in(fake: FakeHerdr) -> None:
+    record()
+    restore(fake)
+    tick(repair_config(repair_bypass=True))
+    start = starts(fake)[0]
+    assert start[start.index("--") + 1:] == (*FLAGS, "--resume", UUID)
+
+
+def test_repair_with_only_bypass_flags_recorded_does_nothing_without_the_opt_in(fake: FakeHerdr) -> None:
+    record(flags=["--dangerously-skip-permissions"])
+    restore(fake)
+    tick(repair_config(repair_bypass=False))
+    tick(repair_config(repair_bypass=False))
+    assert fake.signals == [] and starts(fake) == []
+    assert "repair_bypass" in snap_row()["repair"]["reason"]
+
+
+def test_bypass_class_is_declared_in_the_kinds_table_and_repair_bypass_defaults_off() -> None:
+    assert sleeper.RESTORE_DEFAULTS["repair_bypass"] is False and sleeper.RESTORE_DEFAULTS["repair_flags"] is True
+    assert "--dangerously-skip-permissions" in sleeper.KINDS["claude"]["bypass"]
+    assert "--dangerously-bypass-approvals-and-sandbox" in sleeper.KINDS["codex"]["bypass"]
+    assert sleeper.without_bypass("codex", ["-a", "never", "--oss", "-m", "x"]) == (["--oss", "-m", "x"], ["-a"])
+    assert sleeper.without_bypass("qwen", ["--approval-mode=yolo", "--model", "m"]) == (["--model", "m"], ["--approval-mode"])
+    for kind, spec in sleeper.KINDS.items():
+        assert spec["bypass"] <= (spec["values"] | spec["bools"] | spec["strip_value"] | spec["refused"]
+                                  | sleeper.BOOLEAN_OPTIONS | sleeper.VALUE_OPTIONS), kind
+
+
+def test_repair_bypass_is_a_boolean_config_key(state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = state / "c.toml"
+    monkeypatch.setattr(sleeper, "CONFIG_FILE", cfg)
+    cfg.write_text("[restore]\nrepair_bypass = true\n")
+    assert sleeper.load_config()[0]["repair_bypass"] is True
+    cfg.write_text('[restore]\nrepair_bypass = "yes"\n')
+    with pytest.raises(sleeper.ConfigError, match="repair_bypass must be a boolean"):
+        sleeper.load_config()
+    cfg.write_text("")
+    monkeypatch.setenv("HERDR_SLEEPER_REPAIR_BYPASS", "1")
+    assert sleeper.load_config()[0]["repair_bypass"] is True
+
+
+def test_option_values_never_reach_the_log_the_events_or_the_notification(fake: FakeHerdr) -> None:
+    secret = "sk-secret-value-123"
+    record(flags=["--model", secret])
+    restore(fake)
+    tick(repair_config(notify=True))
+    assert len(starts(fake)) == 1                                          # it was repaired, with the value
+    shown = [c for c in fake.calls if c[:2] == ("notification", "show")]
+    assert shown and secret not in " ".join(shown[0])
+    for path in (sleeper.LOGFILE, sleeper.EVENTS):
+        assert path.exists() and secret not in path.read_text()
+
+
+def test_a_refusal_reason_names_the_option_never_its_value() -> None:
+    for kind in ("hermes", "opencode", "agy", "copilot"):
+        argv, why = sleeper.replayable_argv(["--api-key=sk-secret-value"], kind)
+        assert argv is None and "sk-secret-value" not in (why or "") and "--api-key" in (why or "")
+    assert "sk-secret" not in (sleeper.replayable_argv(["--token", "sk-secret"], "claude")[1] or "")
+    assert "sk-secret" not in (sleeper.replayable_argv(["sk-secret prompt"], "claude")[1] or "")
+
+
+def test_the_manual_resume_line_keeps_values_for_the_operator_but_the_log_masks_them(
+        state: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    entry = {"pane_id": "w1:p1", "uuid": UUID, "kind": "claude", "cwd": "/tmp/p",
+             "argv": ["--model", "secretval", "--resume", UUID]}
+    line = sleeper.manual_command(entry)
+    assert "secretval" in line
+    sleeper.say(f"cannot wake: Manual: {line}")
+    assert "secretval" in capsys.readouterr().err                          # shown whole to the operator
+    logged = sleeper.LOGFILE.read_text()
+    assert "secretval" not in logged and "--model" in logged and UUID in logged
+
+
+def test_state_dir_and_logs_are_private(state: Path) -> None:
+    sleeper.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(sleeper.STATE_DIR, 0o755)
+    sleeper.LOGFILE.write_text("old\n")
+    os.chmod(sleeper.LOGFILE, 0o644)
+    sleeper.say("hello")
+    sleeper.event("e")
+    assert (os.stat(sleeper.STATE_DIR).st_mode & 0o777) == 0o700
+    for path in (sleeper.LOGFILE, sleeper.EVENTS):
+        assert (os.stat(path).st_mode & 0o777) == 0o600, path
+    fresh = sleeper.STATE_DIR / "sessions" / "x"
+    sleeper.set_state_dir(fresh)
+    sleeper.say("again")
+    assert (os.stat(fresh).st_mode & 0o777) == 0o700 and (os.stat(sleeper.LOGFILE).st_mode & 0o777) == 0o600
+
+
+@pytest.mark.parametrize("value", [UUID, "u", "sess-1", "ses_01HXYZabc", "default:agent-1", "/s/x.jsonl", "20251010_123456_ab"])
+def test_real_session_id_shapes_pass(value: str) -> None:
+    assert sleeper.valid_session_id(value)
+    assert sleeper.valid_entry({"pane_id": "w1:p1", "uuid": value, "kind": "claude"})
+
+
+@pytest.mark.parametrize("value", ["", "a b", "x'y", 'x"y', "x;rm", "x$(id)", "x`id`", "x\\'y", "x\ny", "-rf", "--resume",
+                                   "a|b", "a&b", "a>b", "x\x1b[0m", 5, None, "a" * 400])
+def test_a_session_id_that_is_not_a_plain_token_is_refused_everywhere(value: Any, fake: FakeHerdr) -> None:
+    assert not sleeper.valid_session_id(value)
+    assert not sleeper.valid_entry({"pane_id": "w1:p1", "uuid": value, "kind": "claude"})
+    if isinstance(value, str) and value:
+        assert sleeper.resume_argv("claude", value) is None
+        with pytest.raises(sleeper.SleeperError, match="plain token"):
+            sleeper.stub_command("w1:p1", value, "now")
+        ok, reason, _ = sleeper.assess(agent(uuid=value), [], 1.0, {})
+        assert not ok and "plain-token" in reason
+
+
+def test_a_hostile_session_id_is_never_slept(fake: FakeHerdr) -> None:
+    fake.agents[0]["agent_session"] = {"value": "x';touch /tmp/pwn;'"}
+    assert sleeper.sleep_agent(fake.agents[0], 12, set(), dry_run=False)[0] is False
+    assert fake.signals == [] and not any(c[:2] == ("pane", "run") for c in fake.calls)
