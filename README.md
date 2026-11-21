@@ -21,6 +21,13 @@ session identity across restarts, the plugin runtime, typing into panes, idle
 clocks, watcher lifecycle and testing against a real server. Each comes with
 evidence. It is written to be useful whether or not you use this plugin.
 
+> **Status:** [herdr-park](https://github.com/prabhatCH/herdr-park) is
+> becoming the shared base for the three Herdr sleep plugins
+> ([discussion](https://github.com/prabhatCH/herdr-park/issues/4)), and ideas
+> from herdr-sleeper are being ported there as focused pull requests.
+> herdr-sleeper still works and 0.1.2 is the current release, but new feature
+> work is going to herdr-park.
+
 ## Install
 
 ```bash
