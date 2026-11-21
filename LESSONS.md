@@ -145,6 +145,12 @@ processes by argv structure.**
   Make the agent sit idle through one unchanged `state_change_seq` for a minute first. Keep permission and sandbox
   bypass flags out of automatic repair unless the operator opted in: restoring them silently is the worst way to
   be wrong. What stays unsolved: a relaunch made before the first look cannot be told apart.
+- *Also (review round 3):* a denylist of "bypass" flags is only as good as its last read of each CLI's `--help`.
+  The first list missed cursor's `--sandbox disabled`, copilot's `--allow-tool`/`--allow-url`/`--autopilot`,
+  qwen's `--allowed-tools` and omp's `--plan-yolo-into`/`--allow-home`, and codex's `-c`/`--profile` can set the
+  sandbox or approval policy through a config key, so those are bypass-class as a whole. Treat anything that
+  widens tools, paths or urls, or changes approval or sandbox, as bypass; re-read top-level `--help` on an upgrade;
+  and say per kind in the table whether it was checked (the CLIs that were not installed were not).
 
 ## 3. The plugin runtime
 
@@ -280,6 +286,10 @@ observed]*
 - *Evidence:* review (v0.1.2 M3), by reading.
 - *Instead:* refuse every unlisted option, log option names only, mask values in the log copy of a manual resume
   line, and create the state dir 0700 and the logs 0600 anyway.
+- *Also (review round 3):* the same goes for what the user typed: a composer draft was quoted (60 characters) in the
+  repair reason, so it reached the log and `panes.json`; report only its length. Store the replayable flags, not the
+  raw argv, in `panes.json` (a null argv means "nothing to replay"), and give stderr the masked copy of a manual
+  line unless it is a terminal: Herdr may keep a hook's or an action's stderr.
 
 ## 5. Unknown is not absent
 

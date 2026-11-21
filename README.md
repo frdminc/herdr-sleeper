@@ -119,10 +119,18 @@ default), the two launches are indistinguishable and the pane is repaired.
 **Permission and sandbox bypass flags are not re-added by default.** Each
 `KINDS` entry marks its bypass-class options (`--dangerously-skip-permissions`,
 `--yolo`, `--allow-all*`, codex's `--dangerously-bypass-approvals-and-sandbox`,
-`-a`/`--sandbox`, ...). Repair restores the other recorded flags without them;
+`-a`/`--sandbox`, ...), and anything that widens what runs unasked: allowed tools, urls or paths
+(`--add-dir`, copilot's `--allow-tool`/`--allow-url`/`--autopilot`, qwen's `--allowed-tools`, omp's
+`--plan-yolo-into`/`--allow-home`, cursor's `--sandbox` with its value, `--auto-review`, agy's `--mode`) and, for
+codex, `-c`/`--config` and `-p`/`--profile`, which can set the sandbox or approval policy. Both spellings
+(`--opt value`, `--opt=value`) are covered. Repair restores the other recorded flags without them;
 a pane whose record holds only bypass flags is left alone (the pending reason
 says so). `[restore] repair_bypass = true` (env
-`HERDR_SLEEPER_REPAIR_BYPASS`) puts them back too.
+`HERDR_SLEEPER_REPAIR_BYPASS`) puts them back too. The lists were read from each CLI's own top-level `--help`
+where it is installed (claude, codex, hermes, cursor-agent, agy); copilot, qwen, omp and opencode were not on the
+machine they were written on, so their extra entries are by name, and the comments in the `KINDS` table say which.
+Nothing typed in the composer is logged: a draft is reported as `draft present (N chars)`, and `panes.json`
+keeps only the replayable flags of an agent's argv, never a prompt or a refused option's value.
 
 A pane that fails a gate is retried for `repair_window_minutes` (default 30),
 then given up on. A repair is a second resume of the session: the price of
@@ -170,7 +178,9 @@ overridable by `HERDR_SLEEPER_*` env (booleans take true/false/1/0), lowest
 to highest precedence. State: `<plugin state dir>/` per Herdr session —
 `sleeping.json` journal, `panes.json` crash-recovery snapshot, `idle.json`
 idle clocks, `events.jsonl`, `sleeper.log`, `watcher.pid`/`watcher.lock`.
-The state dir is created `0700` and the logs and pid file `0600` (they hold argv, cwd and flags). A session id
+The state dir is created `0700` and the logs and pid file `0600` (they hold argv, cwd and flags).
+Diagnostics go to stderr too, with option values masked in a manual resume line unless stderr is a terminal (a person
+running `herdr-sleeper wake` gets the full command to paste; a hook, a Herdr action or the watcher does not). A session id
 that is not a plain token (letters, numerals, `_ . : @ + = / -`) is refused everywhere: it is typed into the pane's shell.
 A legacy standalone-script journal (`~/.local/state/herdr-sleeper/`) is
 adopted once, on the default session's first startup. An older config —
@@ -281,7 +291,7 @@ focus/command wakes only.
 
 ## Tests
 
-`python3 -m pytest tests/ -q` — 732 tests: the decision logic, the
+`python3 -m pytest tests/ -q` — 785 tests: the decision logic, the
 sleep/wake state machine, pane identity and orphans, the watcher tick and
 loop (idle clocks, backoff, the watcher lock, self-reload), the focus hook,
 the stub and its `y` prompt, restore repair, the 3.9 TOML subset parser, and
