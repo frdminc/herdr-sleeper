@@ -4,7 +4,7 @@ These notes come from building a Herdr plugin that sleeps idle coding-agent pane
 configurable window and resumes them later with `--resume <session-id>`. It was built in two stages. The first was
 a standalone script driven by launchd, with four review-and-hardening rounds. The second was a plugin (v0.1.0,
 then v0.1.1) that went through two adversarial multi-model reviews, a live soak against a real Herdr server, and a
-day of live use.
+day of live use. v0.1.2 (wake by `y`, opt-in focus wake, restore repair, watcher self-reload) was tested against a fake Herdr only, not soaked live.
 
 They are written for anyone building the same thing: the authors of `herdr-agent-hibernate` and `herdr-park`, Herdr
 upstream (discussion #631), and people doing this on tmux or Zellij. Most traps are not specific to Herdr. Herdr is
@@ -124,7 +124,7 @@ processes by argv structure.**
   sidebar "sleeping" claim is) clears the terminal's persisted session ref (`src/terminal/state.rs:781`, in
   `set_hook_authority_at`, reached from `src/app/actions.rs:1490`). Restore also replays the pane's saved screen
   history (`initial_history_ansi`, `src/persist/restore.rs:638, 657`). After a restart, a slept pane therefore
-  shows your old "press Enter to resume" text although no stub is running in it.
+  shows your old "Resume? [y/N]" text although no stub is running in it.
 - *Instead:* decide on purpose which of the two (Herdr or the sleeper) owns resume after a restart. Don't word the
   in-pane hint so that it only makes sense while a stub is actually running.
 - *Untested:* a late agent hook report landing after your claim takes authority back.
@@ -134,6 +134,23 @@ processes by argv structure.**
   `:197` (handoff import). A plugin linked into a running server gets no startup hook.
 - *Trap:* a detached watcher started by an earlier server can still be alive when the next startup hook runs.
 - *Instead:* make startup idempotent, and provide a manual "ensure" action.
+
+**2.7 Herdr's restore launch and the operator's own bare relaunch look identical.**
+- *Trap:* a repair that relaunches "a bare agent in a restored pane" cannot tell Herdr's launch from you exiting it
+  and running a bare `claude --resume` yourself minutes later, and a status that turns idle moments after either
+  one invites an immediate kill.
+- *Evidence:* v0.1.2 security review (traced in the code; not observed live).
+- *Instead:* record the agent's pid and start time when the restore is first noticed, and treat any other pid or
+  start time at repair time as the operator's own relaunch (settle, leave alone; an unreadable pid never repairs).
+  Make the agent sit idle through one unchanged `state_change_seq` for a minute first. Keep permission and sandbox
+  bypass flags out of automatic repair unless the operator opted in: restoring them silently is the worst way to
+  be wrong. What stays unsolved: a relaunch made before the first look cannot be told apart.
+- *Also (review round 3):* a denylist of "bypass" flags is only as good as its last read of each CLI's `--help`.
+  The first list missed cursor's `--sandbox disabled`, copilot's `--allow-tool`/`--allow-url`/`--autopilot`,
+  qwen's `--allowed-tools` and omp's `--plan-yolo-into`/`--allow-home`, and codex's `-c`/`--profile` can set the
+  sandbox or approval policy through a config key, so those are bypass-class as a whole. Treat anything that
+  widens tools, paths or urls, or changes approval or sandbox, as bypass; re-read top-level `--help` on an upgrade;
+  and say per kind in the table whether it was checked (the CLIs that were not installed were not).
 
 ## 3. The plugin runtime
 
@@ -184,6 +201,13 @@ observed]*
   life.
 - *Instead:* spawn the watcher in a new session with stdin, stdout and stderr all set to `/dev/null`.
 
+**3.6 A focus event is not a request to wake anything.**
+- *Trap:* `pane.focused` fires for a click, a workspace or tab switch, a session restore and a scripted focus
+  alike, and Herdr does not say which. Waking on focus resumes (and bills) agents the operator only walked past.
+- *Evidence:* design review of v0.1.1 behaviour; no incident recorded.
+- *Instead:* make focus-wake opt-in (`wake_on_focus = true`), keep the hook cheap and fail closed (a bad config
+  means no wake), and give the pane's own `y` prompt and a command as the default wake paths.
+
 ## 4. Typing into panes
 
 **4.1 `pane run` uses bracketed paste only if the application in the pane turned it on.**
@@ -206,8 +230,11 @@ observed]*
 **4.3 An in-pane stub that reads stdin eats input meant for something else.**
 - *Trap:* the sidebar still shows a slept pane, so orchestrators and humans keep sending it text with `pane run`.
   A stub that wakes on any line throws the text away.
-- *Evidence:* review (v0.1.0 F10).
-- *Instead:* wake only on a bare Enter. Echo anything else back as "ignored".
+- *Evidence:* review (v0.1.0 F10). v0.1.2 tightened it: a bare Enter is what `send-keys` and orchestrators deliver
+  by accident, so waking on it was still too eager.
+- *Instead:* ask a question the stray input cannot answer: wake only on `y` or `Y` plus Enter at a "Resume? [y/N]"
+  prompt. Echo anything else back as "ignored" once, then wait silently. Print the out-of-pane route (the `wake`
+  command) in the prompt too, because after a Herdr restart the saved screen is replayed with no stub behind it (2.5).
 
 **4.4 Typed command lines are shell-specific.**
 - *Trap:* `VAR=value cmd` and POSIX quoting are wrong in nushell or PowerShell panes. Herdr quotes its own
@@ -225,6 +252,44 @@ observed]*
   2. Count the agent as gone only when Herdr has dropped it *and* `process-info` shows no agent process.
   3. Write the sleep record *before* the exit, in an "exit requested" phase. If the agent is still there after
      the wait, leave the record in that phase for the next pass.
+
+**4.6 A stub and a watcher of different versions disagree about the keys that wake.**
+- *Trap:* after an upgrade, the watcher (or a `wake` command) can be new while a stub already sitting in a pane is
+  old, or the reverse. A new stub that only takes `y` is sent a bare Enter by an old wake and stays asleep; an old
+  stub that takes a bare Enter ignores the `y` line a new wake types.
+- *Evidence:* code and unit tests (v0.1.2), not a live soak.
+- *Instead:* let the stub mark its own journal row (`stub_confirm`) before it prompts; the waker sends `y` + Enter
+  to a marked row and a bare Enter to an unmarked one. The mark needs the global lock, which a long watcher tick
+  can hold, so the stub keeps retrying in a thread while it waits at the prompt and stops once it is answered.
+
+**4.7 Typing `y` + Enter into a pane that might just have lost its stub.** *[unverified against a real Herdr]*
+- *Trap:* the waker checks that the stub runs (`stub_running`), then sends `y` and Enter as a separate call. If
+  the stub exits in between (Ctrl-C, or one of its own refuse paths), the keys reach the shell; if it has already
+  exec'd the agent, they reach the agent, which the lock and the stub's `tcflush` mostly close, but only when Herdr
+  writes the keys to the pty before its CLI returns, which we could not check.
+- *Evidence:* review (v0.1.2 L2), by reading; no incident.
+- *Instead (not done here):* a per-sleep nonce in the journal that the stub accepts instead of a literal `y`, or a
+  signal to the stub's pid. Accepted as a known limit for now.
+
+**4.8 Anything an agent reports ends up in a shell line and an argv.**
+- *Trap:* the session id comes from the pane's own program, and the stub line is POSIX quoting typed into whatever
+  shell the pane runs. In fish, a backslash-quote inside single quotes is an escape, so a hostile id could break
+  out of it.
+- *Evidence:* review (v0.1.2 L3); not exploited.
+- *Instead:* validate ids against a plain-token class before they reach a shell line or argv, and refuse the rest.
+  Real ids include uuids, `ses_...`, `default:<agent>` and, for pi and kimi, a file path, so do not narrow the
+  class below the fixtures.
+
+**4.9 Option values are secrets until proven otherwise.**
+- *Trap:* an allow-list that treats an unlisted `--long` as a boolean replays `--api-key=sk-...`, and a log line
+  printing the replayed flags (or a refusal reason quoting the option) then writes it to disk and a notification.
+- *Evidence:* review (v0.1.2 M3), by reading.
+- *Instead:* refuse every unlisted option, log option names only, mask values in the log copy of a manual resume
+  line, and create the state dir 0700 and the logs 0600 anyway.
+- *Also (review round 3):* the same goes for what the user typed: a composer draft was quoted (60 characters) in the
+  repair reason, so it reached the log and `panes.json`; report only its length. Store the replayable flags, not the
+  raw argv, in `panes.json` (a null argv means "nothing to replay"), and give stderr the masked copy of a manual
+  line unless it is a terminal: Herdr may keep a hook's or an action's stderr.
 
 ## 5. Unknown is not absent
 
@@ -305,6 +370,15 @@ label, or leave `done` panes alone for longer. (Review v0.1.0 F22.)
 - *Instead:* when migrating from an external daemon (launchd, systemd, cron), remove or disable its unit file, not
   only the running job. Consider having the new sleeper refuse to run while another sleeper's state is still being
   written.
+
+**7.6 A watcher can reload itself in place, but only behind a gate.**
+- *Trap:* replacing the watcher by kill-and-respawn leaves a gap in which another plugin activity can start a
+  second one, and a half-written script file (a deploy in progress) would take the watcher down at its next restart.
+- *Evidence:* code and unit tests (v0.1.2), including a real exec in a subprocess; not a live soak.
+- *Instead:* compare a code stamp once per tick and act only when the same new stamp is seen on two consecutive
+  ticks, the file compiles, ends with its `__main__` block and `version` exits 0 when run. Then `exec` the same
+  process, handing the lock over as an inheritable fd named in the environment (a flock lives on the open file
+  description, so there is no moment it is free). A bad script is logged once per stamp and the old code keeps running.
 
 ## 8. Concurrency between the watcher, hooks and the in-pane stub
 

@@ -1,12 +1,13 @@
 # herdr-sleeper — sleep idle resumable agents, wake them later
 
 A Herdr plugin that sleeps idle agent panes after a user-chosen window and
-wakes them — on focus, by pressing Enter in the pane, or by command. It is
+wakes them — by answering `y` at the prompt left in the pane, by command, or (opt-in) on focus. It is
 the standalone [`scripts/herdr-sleeper`](https://github.com/frdminc/herdr/tree/herdr-sleeper/scripts/herdr-sleeper)
 reference implementation reborn as a plugin: the fail-closed safety rules
 are unchanged, and the plugin adds what only a plugin can do (an in-process
-idle watcher, wake-on-focus, a sidebar placeholder for slept panes,
-notifications).
+idle watcher, an in-pane wake prompt, optional wake-on-focus, a sidebar
+placeholder for slept panes, notifications, and repair of launch flags that
+Herdr's own restore drops).
 
 Grown from a study of the two existing community plugins — good ideas
 adopted from both (see *Credits* at the end); the safety state machine,
@@ -43,26 +44,33 @@ After an agent has been idle for a user-chosen window (`idle = "12h"` —
 default 12 h), it exits the agent process (SIGTERM for claude and opencode:
 both shut down cleanly and a composer draft is discarded, never submitted),
 keeps the pane, reports a `sleeper` placeholder so the sidebar keeps its
-row, leaves a wake stub in the pane ("press Enter to resume"), prefixes the
+row, leaves a wake stub in the pane (a "Resume? [y/N]" prompt), prefixes the
 pane label with 💤, and posts a notification with the freed MB.
 
 Wake paths:
 
-1. **Focus the pane** — the `pane.focused` hook wakes it (disable with
-   `wake_on_focus = false`). When the pane's stub does it, the hook waits
-   (outside the global lock) until the session is up, then finishes the
-   record and hands the agent its name back.
-2. **Press Enter in the pane** — a bare Enter: the wake stub execs the agent
-   back into its session after the same fail-closed checks and restores the
-   pane label; the next watcher tick hands the agent its name back once the
-   session is seen running. A typed line is not a wake request (an
-   orchestrator's `pane run` must not be eaten): the stub echoes it as
-   ignored and keeps waiting.
-3. **Command** — `herdr plugin action invoke djbclark.herdr-sleeper.wake`
-   wakes the context pane (only that pane), or `wake-all` / `list` / `log`
-   from anywhere. When the pane's stub does the wake, `wake` waits up to
-   30 s for the session to come back before reporting success (a stub that
-   exec'd but whose session Herdr has not reported yet counts as started).
+1. **Answer `y` in the pane** — the stub asks "Resume? [y/N]"; `y` or `Y`
+   plus Enter execs the agent back into its session after the same
+   fail-closed checks and restores the pane label; the next watcher tick
+   hands the agent its name back once the session is seen running. Anything
+   else — a bare Enter, stray text, `pane run` input from an orchestrator — is
+   not a wake request: the stub says once that it is staying asleep and keeps
+   waiting. The prompt also names the `wake` command, because after a Herdr
+   restart the saved screen is replayed with no stub behind it. Ctrl-C leaves
+   a plain shell and prints the manual resume line.
+2. **Command or sidebar action** — `herdr plugin action invoke
+   djbclark.herdr-sleeper.wake` wakes the context pane (only that pane), or
+   `wake-all` / `list` / `log` / `version` from anywhere. When the pane's stub
+   is running, `wake` types `y` + Enter into it and waits up to 30 s for the
+   session to come back before reporting success (a stub that exec'd but
+   whose session Herdr has not reported yet counts as started). A stub left
+   by v0.1.1 or earlier takes a bare Enter, and gets one.
+3. **Focus the pane — opt-in.** With `wake_on_focus = true` (or
+   `HERDR_SLEEPER_WAKE_ON_FOCUS=1`) the `pane.focused` hook wakes the pane
+   through the same path. It is off by default: a focus cannot tell a click
+   from a workspace switch, a restore or a scripted focus, so waking on it
+   resumes agents you only walked past. Changed from v0.1.1, where focus woke
+   by default and the stub woke on a bare Enter.
 
 The idle clock is `state_change_seq` movement from the watcher's polling of
 `agent list` (default 60 s) — no transcript mtime, no launchd, and the
@@ -76,9 +84,79 @@ before the tick sleeps anything. `scan` honours the same clocks (an
 unclocked pane's stretch starts now), so it no longer sleeps everything at
 once.
 
-Supported kinds: **claude** (original argv replayed on wake) and
-**opencode** (`-s <session>`). Codex is deliberately absent — see the
+Supported kinds for sleeping: **claude** (original argv replayed on wake)
+and **opencode** (`-s <session>`). Codex is deliberately absent — see the
 comment on `PROFILES` in the script.
+
+### Restore repair (v0.1.2)
+
+Herdr's own restore relaunches each agent as its binary, a resume flag and
+the session id, so every launch flag (`--model`, `--yolo` ...) is lost. The
+watcher notices a pane whose session was recorded with richer flags in
+another terminal (terminal ids change on every restore and on nothing else)
+and relaunches it once with the recorded flags. **On by default**
+(`[restore] repair_flags = false` turns it off), for every kind in the
+`KINDS` table except codex, which must be named in `repair_kinds`.
+
+Gates, all fail closed: pane not focused and not in `exclude` (the same list
+that keeps a pane from sleeping), agent idle or done, session live nowhere
+else, cwd as recorded, transcript on disk (claude), an empty input box for a
+kind with a screen detector (claude). Two more guard against mistaking your
+own relaunch for Herdr's:
+
+- the agent's process id and start time are recorded when the restore is
+  noticed; if the pane's agent has a different pid or start time when the
+  repair is due, you relaunched it yourself: the marker is settled
+  (`relaunched`, one `repair-settled` event) and the pane is left alone. A pid
+  or start time that cannot be read means no repair;
+- the agent must stay idle, through one unchanged `state_change_seq`, for 60 s
+  before repair acts (never on the first idle tick).
+
+Limit, stated plainly: if you exit the restored agent and relaunch it bare
+*before* the watcher first notices the restore (up to one poll, 60 s by
+default), the two launches are indistinguishable and the pane is repaired.
+
+**Permission and sandbox bypass flags are not re-added by default.** Each
+`KINDS` entry marks its bypass-class options (`--dangerously-skip-permissions`,
+`--yolo`, `--allow-all*`, codex's `--dangerously-bypass-approvals-and-sandbox`,
+`-a`/`--sandbox`, ...), and anything that widens what runs unasked: allowed tools, urls or paths
+(`--add-dir`, copilot's `--allow-tool`/`--allow-url`/`--autopilot`, qwen's `--allowed-tools`, omp's
+`--plan-yolo-into`/`--allow-home`, cursor's `--sandbox` with its value, `--auto-review`, agy's `--mode`) and, for
+codex, `-c`/`--config` and `-p`/`--profile`, which can set the sandbox or approval policy. Both spellings
+(`--opt value`, `--opt=value`) are covered. Repair restores the other recorded flags without them;
+a pane whose record holds only bypass flags is left alone (the pending reason
+says so). `[restore] repair_bypass = true` (env
+`HERDR_SLEEPER_REPAIR_BYPASS`) puts them back too. The lists were read from each CLI's own top-level `--help`
+where it is installed (claude, codex, hermes, cursor-agent, agy); copilot, qwen, omp and opencode were not on the
+machine they were written on, so their extra entries are by name, and the comments in the `KINDS` table say which.
+Nothing typed in the composer is logged: a draft is reported as `draft present (N chars)`, and `panes.json`
+keeps only the replayable flags of an agent's argv, never a prompt or a refused option's value.
+
+A pane that fails a gate is retried for `repair_window_minutes` (default 30),
+then given up on. A repair is a second resume of the session: the price of
+getting the flags back. `list` shows pending repairs. Other `[restore]` keys:
+`repair_kinds`, `require_empty_composer` (env `HERDR_SLEEPER_REPAIR_FLAGS` and
+so on). Per kind, the option tables are an allow-list: a prompt, `--`, a
+one-shot, fork or secret-bearing option, or *any option not listed* for that
+kind (long or short, with or without `=value`), or a CLI the plugin could not
+read, refuses the replay and leaves the pane alone. Option values are never
+written to `sleeper.log`, `events.jsonl` or notifications (names only); the
+manual resume line printed to you keeps them, and its `sleeper.log` copy
+masks them.
+
+### Deploys (v0.1.2)
+
+The watcher reloads itself: when the script's code stamp has changed on two
+consecutive ticks, the file compiles, ends with its `__main__` block and
+`herdr-sleeper version` runs cleanly, it re-execs in place (same pid, the
+watcher lock handed over through an inherited fd). A broken script is logged
+once and the old code keeps running. `startup` also stops a stale-path
+`herdr-sleeper watch` that serves the same state dir (never one of another
+Herdr session, and nothing at all when `lsof` cannot say).
+`herdr plugin action invoke djbclark.herdr-sleeper.version` (or
+`herdr-sleeper version`) prints one line: manifest version, script path, code
+stamp, and the running watcher's pid and stamp (`current` or `STALE`). It is
+read-only.
 
 ## Use
 
@@ -88,16 +166,22 @@ herdr plugin action invoke djbclark.herdr-sleeper.sleep-pane   # context pane
 herdr plugin action invoke djbclark.herdr-sleeper.wake         # context pane
 herdr plugin action invoke djbclark.herdr-sleeper.wake-all
 herdr plugin action invoke djbclark.herdr-sleeper.log
+herdr plugin action invoke djbclark.herdr-sleeper.version
 ```
 
 Config: `<plugin config dir>/config.toml` — Herdr's
 `~/.config/herdr/plugins/config/djbclark.herdr-sleeper/config.toml` (run
 `herdr plugin list` to see it) — `idle` (duration), `agents` (list),
-`exclude` (panes or names), `poll_seconds`, `notify`, `wake_on_focus`;
+`exclude` (panes or names), `poll_seconds`, `notify`, `wake_on_focus`
+(default false), and a `[restore]` table (see *Restore repair*);
 overridable by `HERDR_SLEEPER_*` env (booleans take true/false/1/0), lowest
 to highest precedence. State: `<plugin state dir>/` per Herdr session —
 `sleeping.json` journal, `panes.json` crash-recovery snapshot, `idle.json`
 idle clocks, `events.jsonl`, `sleeper.log`, `watcher.pid`/`watcher.lock`.
+The state dir is created `0700` and the logs and pid file `0600` (they hold argv, cwd and flags).
+Diagnostics go to stderr too, with option values masked in a manual resume line unless stderr is a terminal (a person
+running `herdr-sleeper wake` gets the full command to paste; a hook, a Herdr action or the watcher does not). A session id
+that is not a plain token (letters, numerals, `_ . : @ + = / -`) is refused everywhere: it is typed into the pane's shell.
 A legacy standalone-script journal (`~/.local/state/herdr-sleeper/`) is
 adopted once, on the default session's first startup. An older config —
 v0.1.0's manual-run location
@@ -168,7 +252,7 @@ introduces are marked.
    substring), when that cannot be verified, when an `exit-requested`
    agent is still there (reconcile's two-sighting rule decides, not one
    focus), or when the same terminal moved to another cwd. *Delta:*
-   focus-wakes are debounced by a per-pane lock (one click fires several
+   opt-in focus-wakes are debounced by a per-pane lock (one click fires several
    `pane.focused` hooks) and give up after 10 s on a busy global lock (the
    next focus retries; a pane running another session is skipped silently);
    the in-pane stub resolves the agent binary and checks the transcript
@@ -207,11 +291,14 @@ focus/command wakes only.
 
 ## Tests
 
-`python3 -m pytest tests/ -q` — 156 tests: the decision logic, the
+`python3 -m pytest tests/ -q` — 785 tests: the decision logic, the
 sleep/wake state machine, pane identity and orphans, the watcher tick and
-loop (idle clocks, backoff, the watcher lock), the focus hook, the stub,
-the 3.9 TOML subset parser, and legacy migration, against a fake `herdr`.
-Verified on Python 3.9 (Apple's `/usr/bin/python3`) and 3.14.
+loop (idle clocks, backoff, the watcher lock, self-reload), the focus hook,
+the stub and its `y` prompt, restore repair, the 3.9 TOML subset parser, and
+legacy migration, against a fake `herdr` (one test execs real subprocesses
+inside a pytest tmp dir to check the lock handover). Verified on Python 3.9
+(Apple's `/usr/bin/python3`) and 3.14. Nothing here has been soaked against
+a live Herdr server since v0.1.1.
 
 ## Credits
 
@@ -220,7 +307,7 @@ Verified on Python 3.9 (Apple's `/usr/bin/python3`) and 3.14.
   per-pane lock, `terminal_id` identity, code-stamped watcher replacement,
   `agent_name_taken` handling ideas.
 - `prabhatgmp/herdr-park` — the sidebar claim (`pane report-agent`), the
-  in-pane Enter stub, `notification show`, freed-MB reporting.
+  in-pane wake stub, `notification show`, freed-MB reporting.
 - [`scripts/herdr-sleeper`](https://github.com/frdminc/herdr/tree/herdr-sleeper/scripts/herdr-sleeper)
   (the standalone ancestor) — everything fail-closed.
 
