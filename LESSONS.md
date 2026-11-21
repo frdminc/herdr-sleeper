@@ -135,6 +135,17 @@ processes by argv structure.**
 - *Trap:* a detached watcher started by an earlier server can still be alive when the next startup hook runs.
 - *Instead:* make startup idempotent, and provide a manual "ensure" action.
 
+**2.7 Herdr's restore launch and the operator's own bare relaunch look identical.**
+- *Trap:* a repair that relaunches "a bare agent in a restored pane" cannot tell Herdr's launch from you exiting it
+  and running a bare `claude --resume` yourself minutes later, and a status that turns idle moments after either
+  one invites an immediate kill.
+- *Evidence:* v0.1.2 security review (traced in the code; not observed live).
+- *Instead:* record the agent's pid and start time when the restore is first noticed, and treat any other pid or
+  start time at repair time as the operator's own relaunch (settle, leave alone; an unreadable pid never repairs).
+  Make the agent sit idle through one unchanged `state_change_seq` for a minute first. Keep permission and sandbox
+  bypass flags out of automatic repair unless the operator opted in: restoring them silently is the worst way to
+  be wrong. What stays unsolved: a relaunch made before the first look cannot be told apart.
+
 ## 3. The plugin runtime
 
 **3.1 The plugin config dir is `<config>/plugins/config/<plugin-id>/`.**
@@ -244,6 +255,31 @@ observed]*
 - *Instead:* let the stub mark its own journal row (`stub_confirm`) before it prompts; the waker sends `y` + Enter
   to a marked row and a bare Enter to an unmarked one. The mark needs the global lock, which a long watcher tick
   can hold, so the stub keeps retrying in a thread while it waits at the prompt and stops once it is answered.
+
+**4.7 Typing `y` + Enter into a pane that might just have lost its stub.** *[unverified against a real Herdr]*
+- *Trap:* the waker checks that the stub runs (`stub_running`), then sends `y` and Enter as a separate call. If
+  the stub exits in between (Ctrl-C, or one of its own refuse paths), the keys reach the shell; if it has already
+  exec'd the agent, they reach the agent, which the lock and the stub's `tcflush` mostly close, but only when Herdr
+  writes the keys to the pty before its CLI returns, which we could not check.
+- *Evidence:* review (v0.1.2 L2), by reading; no incident.
+- *Instead (not done here):* a per-sleep nonce in the journal that the stub accepts instead of a literal `y`, or a
+  signal to the stub's pid. Accepted as a known limit for now.
+
+**4.8 Anything an agent reports ends up in a shell line and an argv.**
+- *Trap:* the session id comes from the pane's own program, and the stub line is POSIX quoting typed into whatever
+  shell the pane runs. In fish, a backslash-quote inside single quotes is an escape, so a hostile id could break
+  out of it.
+- *Evidence:* review (v0.1.2 L3); not exploited.
+- *Instead:* validate ids against a plain-token class before they reach a shell line or argv, and refuse the rest.
+  Real ids include uuids, `ses_...`, `default:<agent>` and, for pi and kimi, a file path, so do not narrow the
+  class below the fixtures.
+
+**4.9 Option values are secrets until proven otherwise.**
+- *Trap:* an allow-list that treats an unlisted `--long` as a boolean replays `--api-key=sk-...`, and a log line
+  printing the replayed flags (or a refusal reason quoting the option) then writes it to disk and a notification.
+- *Evidence:* review (v0.1.2 M3), by reading.
+- *Instead:* refuse every unlisted option, log option names only, mask values in the log copy of a manual resume
+  line, and create the state dir 0700 and the logs 0600 anyway.
 
 ## 5. Unknown is not absent
 

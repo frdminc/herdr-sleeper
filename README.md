@@ -91,22 +91,50 @@ comment on `PROFILES` in the script.
 ### Restore repair (v0.1.2)
 
 Herdr's own restore relaunches each agent as its binary, a resume flag and
-the session id, so every launch flag (`--dangerously-skip-permissions`,
-`--yolo`, `--model` …) is lost. The watcher notices a pane whose session was
-recorded with richer flags in another terminal (terminal ids change on every
-restore and on nothing else) and relaunches it once with the recorded flags,
-under the wake gates: pane not focused, agent idle or done, session live
-nowhere else, cwd as recorded, transcript on disk (claude), and an empty
-input box for a kind with a screen detector (claude). It covers every kind in
-the `KINDS` table, not just the two that sleep; codex must be named in
-`repair_kinds`. A pane that fails a gate is retried for
-`repair_window_minutes` (default 30), then given up on. A repair is a second
-resume of the session: the price of getting the flags back. `list` shows
-pending repairs. Config, under a `[restore]` table: `repair_flags` (default
-true), `repair_window_minutes`, `repair_kinds`, `require_empty_composer`
-(env: `HERDR_SLEEPER_REPAIR_FLAGS` and so on). Per kind, anything the plugin
-cannot vouch for replaying (prompts, `--`, one-shot, fork or secret-bearing
-options, or a CLI it could not read) is refused, never guessed.
+the session id, so every launch flag (`--model`, `--yolo` ...) is lost. The
+watcher notices a pane whose session was recorded with richer flags in
+another terminal (terminal ids change on every restore and on nothing else)
+and relaunches it once with the recorded flags. **On by default**
+(`[restore] repair_flags = false` turns it off), for every kind in the
+`KINDS` table except codex, which must be named in `repair_kinds`.
+
+Gates, all fail closed: pane not focused and not in `exclude` (the same list
+that keeps a pane from sleeping), agent idle or done, session live nowhere
+else, cwd as recorded, transcript on disk (claude), an empty input box for a
+kind with a screen detector (claude). Two more guard against mistaking your
+own relaunch for Herdr's:
+
+- the agent's process id and start time are recorded when the restore is
+  noticed; if the pane's agent has a different pid or start time when the
+  repair is due, you relaunched it yourself: the marker is settled
+  (`relaunched`, one `repair-settled` event) and the pane is left alone. A pid
+  or start time that cannot be read means no repair;
+- the agent must stay idle, through one unchanged `state_change_seq`, for 60 s
+  before repair acts (never on the first idle tick).
+
+Limit, stated plainly: if you exit the restored agent and relaunch it bare
+*before* the watcher first notices the restore (up to one poll, 60 s by
+default), the two launches are indistinguishable and the pane is repaired.
+
+**Permission and sandbox bypass flags are not re-added by default.** Each
+`KINDS` entry marks its bypass-class options (`--dangerously-skip-permissions`,
+`--yolo`, `--allow-all*`, codex's `--dangerously-bypass-approvals-and-sandbox`,
+`-a`/`--sandbox`, ...). Repair restores the other recorded flags without them;
+a pane whose record holds only bypass flags is left alone (the pending reason
+says so). `[restore] repair_bypass = true` (env
+`HERDR_SLEEPER_REPAIR_BYPASS`) puts them back too.
+
+A pane that fails a gate is retried for `repair_window_minutes` (default 30),
+then given up on. A repair is a second resume of the session: the price of
+getting the flags back. `list` shows pending repairs. Other `[restore]` keys:
+`repair_kinds`, `require_empty_composer` (env `HERDR_SLEEPER_REPAIR_FLAGS` and
+so on). Per kind, the option tables are an allow-list: a prompt, `--`, a
+one-shot, fork or secret-bearing option, or *any option not listed* for that
+kind (long or short, with or without `=value`), or a CLI the plugin could not
+read, refuses the replay and leaves the pane alone. Option values are never
+written to `sleeper.log`, `events.jsonl` or notifications (names only); the
+manual resume line printed to you keeps them, and its `sleeper.log` copy
+masks them.
 
 ### Deploys (v0.1.2)
 
@@ -142,6 +170,8 @@ overridable by `HERDR_SLEEPER_*` env (booleans take true/false/1/0), lowest
 to highest precedence. State: `<plugin state dir>/` per Herdr session —
 `sleeping.json` journal, `panes.json` crash-recovery snapshot, `idle.json`
 idle clocks, `events.jsonl`, `sleeper.log`, `watcher.pid`/`watcher.lock`.
+The state dir is created `0700` and the logs and pid file `0600` (they hold argv, cwd and flags). A session id
+that is not a plain token (letters, numerals, `_ . : @ + = / -`) is refused everywhere: it is typed into the pane's shell.
 A legacy standalone-script journal (`~/.local/state/herdr-sleeper/`) is
 adopted once, on the default session's first startup. An older config —
 v0.1.0's manual-run location
@@ -251,7 +281,7 @@ focus/command wakes only.
 
 ## Tests
 
-`python3 -m pytest tests/ -q` — 686 tests: the decision logic, the
+`python3 -m pytest tests/ -q` — 732 tests: the decision logic, the
 sleep/wake state machine, pane identity and orphans, the watcher tick and
 loop (idle clocks, backoff, the watcher lock, self-reload), the focus hook,
 the stub and its `y` prompt, restore repair, the 3.9 TOML subset parser, and
